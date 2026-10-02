@@ -8,8 +8,12 @@ import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.sql.Timestamp;
+import java.sql.PreparedStatement;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @Repository
 public class EventStore {
@@ -69,5 +73,24 @@ public class EventStore {
 
     public List<String> findRunningWorkflowIds() {
         return jdbc.queryForList("SELECT workflow_id FROM workflow_runs WHERE status = 'RUNNING'", String.class);
+    }
+
+    /** Loads many workflows in ONE query. Used by crash recovery so it scales with data, not round trips. */
+    public Map<String, List<WorkflowEvent>> loadAll(Collection<String> workflowIds) {
+        Map<String, List<WorkflowEvent>> result = new LinkedHashMap<>();
+        if (workflowIds.isEmpty()) return result;
+        jdbc.query(con -> {
+                    PreparedStatement ps = con.prepareStatement("""
+                            SELECT workflow_id, event_type, payload::text FROM workflow_events
+                            WHERE workflow_id = ANY(?) ORDER BY workflow_id, sequence
+                            """);
+                    ps.setArray(1, con.createArrayOf("varchar", workflowIds.toArray()));
+                    return ps;
+                },
+                rs -> {
+                    result.computeIfAbsent(rs.getString(1), k -> new ArrayList<>())
+                            .add(codec.decode(rs.getString(2), rs.getString(3)));
+                });
+        return result;
     }
 }

@@ -5,7 +5,10 @@ import com.flowforge.common.state.Decision;
 import com.flowforge.common.state.WorkflowState;
 import org.springframework.stereotype.Repository;
 
+import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /** Loads aggregates by replaying their events, and saves decider output. */
@@ -25,5 +28,11 @@ public class WorkflowRepository {
 
     public void save(WorkflowState state, Decision decision) {
         if (!decision.isIgnored()) store.append(state, decision.events());
+    }
+
+    public Map<String, WorkflowState> loadAll(Collection<String> workflowIds) {
+        Map<String, WorkflowState> states = new LinkedHashMap<>();
+        store.loadAll(workflowIds).forEach((id, events) -> states.put(id, WorkflowState.replay(id, events)));
+        return states;
     }
 }
