@@ -2,10 +2,35 @@ spring:
   application:
     name: flowforge-orchestrator
   datasource:
-    url: jdbc:postgresql://localhost:5432/flowforge
+    url: jdbc:postgresql://localhost:5433/flowforge
     username: flowforge
     password: flowforge
     hikari:
       maximum-pool-size: 20
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        linger.ms: 5
+    consumer:
+      group-id: flowforge-orchestrator
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      max-poll-records: 500
+      properties:
+        # Co-partitioning: partition N of workflow-commands and task-results go to the same instance.
+        partition.assignment.strategy: org.apache.kafka.clients.consumer.RangeAssignor
+    listener:
+      concurrency: 3
+
+flowforge:
+  kafka:
+    replicas: 1
+
 server:
   port: 8081
