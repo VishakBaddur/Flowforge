@@ -44,10 +44,11 @@ public class WorkerListener {
     private final Clock clock = Clock.systemUTC();
     private final String workerId;
     private final Semaphore inFlight;
+    private final WorkerMetrics metrics;
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
 
     public WorkerListener(KafkaTemplate<String, String> kafka, JsonMapper json, TaskRunner runner,
-                          IdempotencyStore idempotency,
+                          IdempotencyStore idempotency, WorkerMetrics metrics,
                           @Value("${HOSTNAME:local}") String host,
                           @Value("${flowforge.worker.max-in-flight:1000}") int maxInFlight) {
         this.kafka = kafka;
@@ -56,11 +57,14 @@ public class WorkerListener {
         this.idempotency = idempotency;
         this.workerId = host + "-" + UUID.randomUUID().toString().substring(0, 8);
         this.inFlight = new Semaphore(maxInFlight);
+        this.metrics = metrics;
+        metrics.bindInFlight(inFlight, maxInFlight);
         log.info("Worker {} ready; task types {}", workerId, runner.supportedTypes());
     }
 
     @KafkaListener(topics = Topics.TASKS, batch = "true")
     public void onBatch(List<ConsumerRecord<String, String>> records) {
+        metrics.batch(records.size());
         Instant now = clock.instant();
         List<TaskCommand> toRun = new ArrayList<>();
         List<CompletableFuture<?>> acks = new ArrayList<>();
@@ -72,6 +76,7 @@ public class WorkerListener {
             if (done.isPresent()) {
                 log.info("{} already completed; replaying cached result for attempt {}",
                         command.idempotencyKey(), command.attempt());
+                metrics.cacheReplay();
                 acks.add(send(TaskResult.succeeded(command, workerId, done.get(), now)));
                 continue;
             }
@@ -79,6 +84,7 @@ public class WorkerListener {
             Duration lease = Duration.ofMillis(command.timeoutMillis()).plus(LEASE_GRACE);
             if (!idempotency.tryClaim(command.idempotencyKey(), command.attempt(), workerId, PENDING_CLAIM_TTL)) {
                 log.debug("{} attempt {} already claimed by another worker", command.idempotencyKey(), command.attempt());
+                metrics.claimSkipped();
                 continue;
             }
             acks.add(send(TaskResult.started(command, workerId, now.plus(lease), now)));
@@ -108,15 +114,20 @@ public class WorkerListener {
 
     private void execute(TaskCommand command) {
         TaskResult result;
+        String outcome;
+        long startNanos = System.nanoTime();
         try {
             Map<String, String> output = runner.run(command);
-            idempotency.markCompleted(command.idempotencyKey(), output);
+            outcome = "success";
+            idempotency.markCompleted(command.idempotencyKey(), output);   // never throws: degrades if Redis is down
             result = TaskResult.succeeded(command, workerId, output, clock.instant());
         } catch (Exception e) {
             if (e instanceof InterruptedException) Thread.currentThread().interrupt();
+            outcome = e instanceof TaskTimeoutException ? "timeout" : "failure";
             String error = e.getClass().getSimpleName() + ": " + e.getMessage();
             result = TaskResult.failed(command, workerId, error, clock.instant());
         }
+        metrics.execution(command.type(), outcome, System.nanoTime() - startNanos);
         send(result).whenComplete((ok, err) -> {
             if (err != null) log.warn("Could not report result for {}; lease expiry will retry it",
                     command.idempotencyKey(), err);

@@ -77,7 +77,7 @@ public final class WorkflowState {
                 if (e.attempt() != expected)
                     throw new IllegalStateException("task " + e.taskId() + " queued as attempt " + e.attempt()
                             + ", expected " + expected);
-                transition(e.taskId(), Set.of(PENDING, RETRY_WAIT), t -> t.queued(e.attempt()));
+                transition(e.taskId(), Set.of(PENDING, RETRY_WAIT), t -> t.queued(e.attempt(), e.occurredAt()));
             }
             case TaskStarted e -> {
                 checkAttempt(e.taskId(), e.attempt());

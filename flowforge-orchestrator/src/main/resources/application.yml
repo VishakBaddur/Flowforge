@@ -37,3 +37,16 @@ flowforge:
 
 server:
   port: 8081
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true          # /actuator/health/liveness and /readiness for Kubernetes
+  metrics:
+    tags:
+      application: ${spring.application.name}

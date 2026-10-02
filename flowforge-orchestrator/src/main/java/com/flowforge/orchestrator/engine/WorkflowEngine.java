@@ -53,6 +53,7 @@ public class WorkflowEngine {
     private final EventStore store;
     private final TaskPublisher publisher;
     private final Clock clock;
+    private final EngineMetrics metrics;
     private final WorkflowDecider decider = WorkflowDecider.withRandomJitter();
 
     private final Map<String, WorkflowState> cache = new ConcurrentHashMap<>();
@@ -61,11 +62,14 @@ public class WorkflowEngine {
     private final ScheduledExecutorService timers =
             Executors.newScheduledThreadPool(4, Thread.ofPlatform().name("ff-timer-", 0).daemon().factory());
 
-    public WorkflowEngine(WorkflowRepository repository, EventStore store, TaskPublisher publisher, Clock clock) {
+    public WorkflowEngine(WorkflowRepository repository, EventStore store, TaskPublisher publisher, Clock clock,
+                          EngineMetrics metrics) {
         this.repository = repository;
         this.store = store;
         this.publisher = publisher;
         this.clock = clock;
+        this.metrics = metrics;
+        metrics.bindActiveWorkflows(cache);
         for (int i = 0; i < LOCK_STRIPES; i++) locks[i] = new Object();
     }
 
@@ -110,6 +114,7 @@ public class WorkflowEngine {
                 rearm(state);
             }
         });
+        metrics.recovery(System.nanoTime() - startNanos, states.size());
         log.info("Recovered {} running workflows for partitions {} in {} ms",
                 states.size(), new TreeSet<>(assigned), (System.nanoTime() - startNanos) / 1_000_000);
     }
@@ -147,12 +152,16 @@ public class WorkflowEngine {
                     decision = action.apply(state);
                     if (decision.isIgnored()) {
                         log.debug("Ignored input for {}: {}", workflowId, decision.ignoredReason());
+                        metrics.ignored(decision.ignoredReason());
                         cacheIfActive(state);
                         return;
                     }
-                    store.append(state, decision.events());
+                    WorkflowState toSave = state;
+                    Decision toPersist = decision;
+                    metrics.timeAppend(() -> store.append(toSave, toPersist.events()));
                 } catch (ConcurrencyConflictException e) {
                     cache.remove(workflowId);
+                    metrics.conflict();
                     if (attempt >= MAX_CONFLICT_RETRIES) throw e;
                     log.info("Concurrency conflict on {}; reloading (attempt {})", workflowId, attempt);
                     continue;
@@ -166,6 +175,7 @@ public class WorkflowEngine {
                 }
 
                 cacheIfActive(state);
+                metrics.recordEvents(state, decision.events());
                 afterCommit(state, decision.events());
                 return;
             }
@@ -278,7 +288,9 @@ public class WorkflowEngine {
     }
 
     private void schedule(Instant at, Runnable task) {
-        long delayMs = Math.max(0, Duration.between(clock.instant(), at).toMillis());
+        // Round UP to whole milliseconds. Truncating fired timers up to 1ms early; the "not due yet" path then
+        // rescheduled with a truncated 0ms delay and spun until the deadline passed (seen as timer_early in metrics).
+        long delayMs = Math.max(0, Duration.between(clock.instant(), at).plusNanos(999_999).toMillis());
         timers.schedule(() -> {
             try {
                 task.run();
