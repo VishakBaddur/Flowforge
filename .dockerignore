@@ -1,0 +1,3 @@
+# Only the built jars go into the build context.
+*
+!flowforge-*/target/*-SNAPSHOT.jar

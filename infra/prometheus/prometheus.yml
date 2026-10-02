@@ -14,3 +14,23 @@ scrape_configs:
     metrics_path: /actuator/prometheus
     static_configs:
       - targets: ["host.docker.internal:8082", "host.docker.internal:8084"]
+
+  # Containerized services (docker compose --profile app): DNS discovery finds every replica.
+  - job_name: flowforge-api-compose
+    metrics_path: /actuator/prometheus
+    dns_sd_configs:
+      - names: [api]
+        type: A
+        port: 8080
+  - job_name: flowforge-orchestrator-compose
+    metrics_path: /actuator/prometheus
+    dns_sd_configs:
+      - names: [orchestrator]
+        type: A
+        port: 8081
+  - job_name: flowforge-worker-compose
+    metrics_path: /actuator/prometheus
+    dns_sd_configs:
+      - names: [worker]
+        type: A
+        port: 8082
