@@ -21,7 +21,7 @@ public final class ApiModels {
 
     public record SubmitResponse(String workflowId, String status) {}
 
-    public record WorkflowView(String workflowId, String name, String status, long version,
+    public record WorkflowView(String workflowId, String name, String owner, String status, long version,
                                Instant startedAt, Instant finishedAt, List<TaskView> tasks) implements Serializable {
 
         public boolean terminal() {
@@ -35,7 +35,7 @@ public final class ApiModels {
                 tasks.add(new TaskView(def.id(), def.type(), new ArrayList<>(def.dependsOn()), t.status().name(),
                         t.attempt(), t.lastError(), new HashMap<>(t.output())));
             }
-            return new WorkflowView(s.workflowId(), s.definition().name(), s.status().name(), s.version(),
+            return new WorkflowView(s.workflowId(), s.definition().name(), s.owner(), s.status().name(), s.version(),
                     s.startedAt(), s.finishedAt(), tasks);
         }
     }
@@ -43,11 +43,11 @@ public final class ApiModels {
     public record TaskView(String id, String type, List<String> dependsOn, String status, int attempt,
                            String lastError, Map<String, String> output) implements Serializable {}
 
-    public record WorkflowSummary(String workflowId, String name, String status, long version,
+    public record WorkflowSummary(String workflowId, String name, String owner, String status, long version,
                                   Instant createdAt, Instant updatedAt) {
 
         public static WorkflowSummary from(WorkflowRunEntity e) {
-            return new WorkflowSummary(e.getWorkflowId(), e.getName(), e.getStatus(), e.getVersion(),
+            return new WorkflowSummary(e.getWorkflowId(), e.getName(), e.getOwner(), e.getStatus(), e.getVersion(),
                     e.getCreatedAt(), e.getUpdatedAt());
         }
     }

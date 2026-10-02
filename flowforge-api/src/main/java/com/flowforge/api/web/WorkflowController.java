@@ -11,6 +11,7 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.web.PageableDefault;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 import java.net.URI;
@@ -28,33 +29,40 @@ public class WorkflowController {
 
     @PostMapping
     public ResponseEntity<SubmitResponse> submit(@RequestBody WorkflowDefinition definition,
-                                                 @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey) {
-        String id = service.submit(definition, idempotencyKey);
+                                                 @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
+                                                 Authentication auth) {
+        String id = service.submit(definition, idempotencyKey, auth.getName());
         return ResponseEntity.accepted()
                 .location(URI.create("/api/v1/workflows/" + id))
                 .body(new SubmitResponse(id, "ACCEPTED"));
     }
 
     @GetMapping("/{workflowId}")
-    public WorkflowView get(@PathVariable String workflowId) {
-        return service.get(workflowId);
+    public WorkflowView get(@PathVariable String workflowId, Authentication auth) {
+        WorkflowView view = service.get(workflowId);   // cached for terminal workflows
+        Access.requireVisible(view.owner(), workflowId, auth);
+        return view;
     }
 
     @GetMapping
     public PageResponse<WorkflowSummary> list(@RequestParam(required = false) String status,
                                               @PageableDefault(size = 20, sort = "createdAt", direction = Sort.Direction.DESC)
-                                              Pageable pageable) {
-        return service.list(status, pageable);
+                                              Pageable pageable,
+                                              Authentication auth) {
+        return service.list(Access.ownerFilter(auth), status, pageable);
     }
 
     @GetMapping("/{workflowId}/events")
-    public List<EventView> events(@PathVariable String workflowId) {
+    public List<EventView> events(@PathVariable String workflowId, Authentication auth) {
+        Access.requireVisible(service.get(workflowId).owner(), workflowId, auth);
         return service.events(workflowId);
     }
 
     @PostMapping("/{workflowId}/cancel")
     public ResponseEntity<SubmitResponse> cancel(@PathVariable String workflowId,
-                                                 @RequestParam(defaultValue = "cancelled via API") String reason) {
+                                                 @RequestParam(defaultValue = "cancelled via API") String reason,
+                                                 Authentication auth) {
+        Access.requireVisible(service.get(workflowId).owner(), workflowId, auth);
         service.cancel(workflowId, reason);
         return ResponseEntity.accepted().body(new SubmitResponse(workflowId, "CANCEL_REQUESTED"));
     }

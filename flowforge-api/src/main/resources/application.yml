@@ -31,3 +31,21 @@ spring:
 
 server:
   port: 8080
+
+flowforge:
+  security:
+    jwt-secret: dev-only-secret-change-me-0123456789abcdef0123456789
+    token-ttl: 1h
+    users:
+      - username: alice
+        password: "{noop}alice-pass"
+        scopes: [workflows:read, workflows:write]
+      - username: bob
+        password: "{noop}bob-pass"
+        scopes: [workflows:read, workflows:write]
+      - username: viewer
+        password: "{noop}viewer-pass"
+        scopes: [workflows:read]
+      - username: admin
+        password: "{noop}admin-pass"
+        scopes: [workflows:read, workflows:write, workflows:admin]

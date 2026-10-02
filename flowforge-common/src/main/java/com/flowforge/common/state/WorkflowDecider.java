@@ -35,9 +35,13 @@ public final class WorkflowDecider {
     }
 
     public Decision start(WorkflowState state, WorkflowDefinition definition, Instant now) {
+        return start(state, definition, null, now);
+    }
+
+    public Decision start(WorkflowState state, WorkflowDefinition definition, String owner, Instant now) {
         if (state.definition() != null) return Decision.ignored("workflow already started");
         List<WorkflowEvent> out = new ArrayList<>();
-        emit(state, out, new WorkflowStarted(state.workflowId(), now, definition));
+        emit(state, out, new WorkflowStarted(state.workflowId(), now, definition, owner));
         for (String root : state.dag().roots()) {
             emit(state, out, new TaskQueued(state.workflowId(), now, root, 1));
         }

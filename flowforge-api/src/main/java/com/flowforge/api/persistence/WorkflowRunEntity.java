@@ -18,6 +18,7 @@ public class WorkflowRunEntity {
     @Column(name = "workflow_id")
     private String workflowId;
     private String name;
+    private String owner;
     private String status;
     private long version;
     @Column(name = "created_at")
@@ -30,6 +31,7 @@ public class WorkflowRunEntity {
 
     public String getWorkflowId() { return workflowId; }
     public String getName() { return name; }
+    public String getOwner() { return owner; }
     public String getStatus() { return status; }
     public long getVersion() { return version; }
     public Instant getCreatedAt() { return createdAt; }

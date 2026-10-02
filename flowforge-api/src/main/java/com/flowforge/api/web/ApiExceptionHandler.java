@@ -6,6 +6,7 @@ import com.flowforge.common.dag.InvalidWorkflowException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.security.authentication.BadCredentialsException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
@@ -25,6 +26,11 @@ public class ApiExceptionHandler {
         Throwable root = e;
         while (root.getCause() != null) root = root.getCause();
         return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, root.getMessage());
+    }
+
+    @ExceptionHandler(BadCredentialsException.class)
+    ProblemDetail badCredentials(BadCredentialsException e) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.UNAUTHORIZED, e.getMessage());
     }
 
     @ExceptionHandler(WorkflowNotFoundException.class)

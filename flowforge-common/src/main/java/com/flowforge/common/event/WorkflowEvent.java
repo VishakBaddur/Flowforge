@@ -19,8 +19,12 @@ public sealed interface WorkflowEvent {
         return getClass().getSimpleName();
     }
 
-    record WorkflowStarted(String workflowId, Instant occurredAt, WorkflowDefinition definition)
-            implements WorkflowEvent {}
+    record WorkflowStarted(String workflowId, Instant occurredAt, WorkflowDefinition definition, String owner)
+            implements WorkflowEvent {
+        public WorkflowStarted(String workflowId, Instant occurredAt, WorkflowDefinition definition) {
+            this(workflowId, occurredAt, definition, null);
+        }
+    }
 
     record TaskQueued(String workflowId, Instant occurredAt, String taskId, int attempt)
             implements WorkflowEvent {}

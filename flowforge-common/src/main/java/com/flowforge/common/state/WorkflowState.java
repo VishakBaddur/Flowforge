@@ -37,6 +37,7 @@ public final class WorkflowState {
     private final String workflowId;
     private final Map<String, TaskState> tasks = new LinkedHashMap<>();
     private WorkflowDefinition definition;
+    private String owner;
     private Dag dag;
     private WorkflowStatus status;
     private long version;           // number of events applied == sequence of the last event
@@ -65,6 +66,7 @@ public final class WorkflowState {
             case WorkflowStarted e -> {
                 if (definition != null) throw new IllegalStateException("workflow already started");
                 definition = e.definition();
+                owner = e.owner();
                 dag = DagValidator.validate(definition);
                 status = WorkflowStatus.RUNNING;
                 startedAt = e.occurredAt();
@@ -155,6 +157,7 @@ public final class WorkflowState {
 
     public String workflowId() { return workflowId; }
     public WorkflowDefinition definition() { return definition; }
+    public String owner() { return owner; }
     public Dag dag() { return dag; }
     public WorkflowStatus status() { return status; }
     public long version() { return version; }

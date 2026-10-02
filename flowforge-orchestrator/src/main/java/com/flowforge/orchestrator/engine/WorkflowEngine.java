@@ -72,7 +72,7 @@ public class WorkflowEngine {
     public void handle(WorkflowCommand command) {
         Instant now = clock.instant();
         switch (command.kind()) {
-            case START -> execute(command.workflowId(), true, s -> decider.start(s, command.definition(), now));
+            case START -> execute(command.workflowId(), true, s -> decider.start(s, command.definition(), command.owner(), now));
             case CANCEL -> execute(command.workflowId(), false, s -> decider.cancel(s, command.reason(), now));
         }
     }

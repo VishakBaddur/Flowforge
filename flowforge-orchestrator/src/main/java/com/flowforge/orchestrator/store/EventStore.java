@@ -25,8 +25,8 @@ public class EventStore {
             """;
 
     private static final String UPSERT_RUN = """
-            INSERT INTO workflow_runs (workflow_id, name, status, version, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO workflow_runs (workflow_id, name, owner, status, version, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (workflow_id) DO UPDATE
                SET status = EXCLUDED.status, version = EXCLUDED.version, updated_at = EXCLUDED.updated_at
             """;
@@ -61,7 +61,7 @@ public class EventStore {
             throw new ConcurrencyConflictException(id, expectedVersion, ex);
         }
 
-        jdbc.update(UPSERT_RUN, id, state.definition().name(), state.status().name(), state.version(),
+        jdbc.update(UPSERT_RUN, id, state.definition().name(), state.owner(), state.status().name(), state.version(),
                 Timestamp.from(state.startedAt()), Timestamp.from(events.getLast().occurredAt()));
     }
 

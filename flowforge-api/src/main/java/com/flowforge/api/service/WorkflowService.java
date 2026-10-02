@@ -47,17 +47,17 @@ public class WorkflowService {
     }
 
     /** Validates synchronously, then hands off to the orchestrator. Same idempotency key => same workflow id. */
-    public String submit(WorkflowDefinition definition, String idempotencyKey) {
+    public String submit(WorkflowDefinition definition, String idempotencyKey, String owner) {
         DagValidator.validate(definition);
         String workflowId = idempotencyKey == null || idempotencyKey.isBlank()
                 ? "wf-" + UUID.randomUUID()
-                : "wf-" + UUID.nameUUIDFromBytes(idempotencyKey.getBytes(StandardCharsets.UTF_8));
-        publish(workflowId, WorkflowCommand.start(workflowId, definition, clock.instant()));
+                : "wf-" + UUID.nameUUIDFromBytes((owner + ":" + idempotencyKey).getBytes(StandardCharsets.UTF_8));
+        publish(workflowId, WorkflowCommand.start(workflowId, definition, owner, clock.instant()));
         return workflowId;
     }
 
+    /** Caller must have checked visibility (see WorkflowController). */
     public void cancel(String workflowId, String reason) {
-        if (!runs.existsById(workflowId)) throw new WorkflowNotFoundException(workflowId);
         publish(workflowId, WorkflowCommand.cancel(workflowId, reason, clock.instant()));
     }
 
@@ -71,8 +71,12 @@ public class WorkflowService {
         return WorkflowView.from(WorkflowState.replay(workflowId, log));
     }
 
-    public PageResponse<WorkflowSummary> list(String status, Pageable pageable) {
-        Page<WorkflowSummary> page = (status == null ? runs.findAll(pageable) : runs.findByStatus(status.toUpperCase(), pageable))
+    /** owner == null means "all owners" (admins only). */
+    public PageResponse<WorkflowSummary> list(String owner, String status, Pageable pageable) {
+        String s = status == null ? null : status.toUpperCase();
+        Page<WorkflowSummary> page = (owner == null
+                ? (s == null ? runs.findAll(pageable) : runs.findByStatus(s, pageable))
+                : (s == null ? runs.findByOwner(owner, pageable) : runs.findByOwnerAndStatus(owner, s, pageable)))
                 .map(WorkflowSummary::from);
         return new PageResponse<>(page.getContent(), page.getNumber(), page.getSize(),
                 page.getTotalElements(), page.getTotalPages());
