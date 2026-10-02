@@ -16,6 +16,8 @@ import com.flowforge.common.state.WorkflowState;
 import com.flowforge.orchestrator.store.ConcurrencyConflictException;
 import com.flowforge.orchestrator.store.EventStore;
 import com.flowforge.orchestrator.store.PendingAppend;
+import io.micrometer.tracing.Span;
+import io.micrometer.tracing.Tracer;
 import com.flowforge.orchestrator.store.WorkflowRepository;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
@@ -27,6 +29,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -57,6 +60,7 @@ public class WorkflowEngine {
     private final TaskPublisher publisher;
     private final Clock clock;
     private final EngineMetrics metrics;
+    private final Tracer tracer;
     private final WorkflowDecider decider = WorkflowDecider.withRandomJitter();
 
     private final Map<String, WorkflowState> cache = new ConcurrentHashMap<>();
@@ -66,7 +70,8 @@ public class WorkflowEngine {
             Executors.newScheduledThreadPool(4, Thread.ofPlatform().name("ff-timer-", 0).daemon().factory());
 
     public WorkflowEngine(WorkflowRepository repository, EventStore store, TaskPublisher publisher, Clock clock,
-                          EngineMetrics metrics) {
+                          EngineMetrics metrics, Tracer tracer) {
+        this.tracer = tracer;
         this.repository = repository;
         this.store = store;
         this.publisher = publisher;
@@ -79,14 +84,18 @@ public class WorkflowEngine {
     // ------------------------------------------------------------------ inputs
 
     /** One unit of work for a workflow: what to decide once its state is loaded. */
-    public record Input(String workflowId, boolean createIfMissing, Function<WorkflowState, Decision> action) {}
+    public record Input(String workflowId, boolean createIfMissing, Function<WorkflowState, Decision> action, Span span) {
+        public Input withSpan(Span s) {
+            return new Input(workflowId, createIfMissing, action, s);
+        }
+    }
 
     public Input inputFor(WorkflowCommand command) {
         Instant now = clock.instant();
         return switch (command.kind()) {
             case START -> new Input(command.workflowId(), true,
-                    s -> decider.start(s, command.definition(), command.owner(), now));
-            case CANCEL -> new Input(command.workflowId(), false, s -> decider.cancel(s, command.reason(), now));
+                    s -> decider.start(s, command.definition(), command.owner(), now), null);
+            case CANCEL -> new Input(command.workflowId(), false, s -> decider.cancel(s, command.reason(), now), null);
         };
     }
 
@@ -94,11 +103,11 @@ public class WorkflowEngine {
         Instant now = clock.instant();
         return switch (r.kind()) {
             case STARTED -> new Input(r.workflowId(), false,
-                    s -> decider.taskStarted(s, r.taskId(), r.attempt(), r.workerId(), r.leaseExpiresAt(), now));
+                    s -> decider.taskStarted(s, r.taskId(), r.attempt(), r.workerId(), r.leaseExpiresAt(), now), null);
             case SUCCEEDED -> new Input(r.workflowId(), false,
-                    s -> decider.taskSucceeded(s, r.taskId(), r.attempt(), r.output(), now));
+                    s -> decider.taskSucceeded(s, r.taskId(), r.attempt(), r.output(), now), null);
             case FAILED -> new Input(r.workflowId(), false,
-                    s -> decider.taskFailed(s, r.taskId(), r.attempt(), r.error(), now));
+                    s -> decider.taskFailed(s, r.taskId(), r.attempt(), r.error(), now), null);
         };
     }
 
@@ -128,6 +137,8 @@ public class WorkflowEngine {
         List<Object> stripes = byWorkflow.keySet().stream()
                 .map(this::stripeOf).distinct().sorted().map(i -> locks[i]).toList();
 
+        Map<String, Span> spanOf = new HashMap<>();
+        for (Input in : inputs) if (in.span() != null) spanOf.put(in.workflowId(), in.span());
         boolean[] fallback = {false};
         withLocks(stripes, 0, () -> {
             List<PendingAppend> pending = new ArrayList<>();
@@ -144,7 +155,10 @@ public class WorkflowEngine {
                     List<WorkflowEvent> events = new ArrayList<>();
                     for (Input in : entry.getValue()) {
                         Decision d = in.action().apply(state);
-                        if (d.isIgnored()) metrics.ignored(d.ignoredReason());
+                        if (d.isIgnored()) {
+                            metrics.ignored(d.ignoredReason());
+                            if (in.span() != null) in.span().tag("ignored", d.ignoredReason());
+                        }
                         else events.addAll(d.events());
                     }
                     if (events.isEmpty()) cacheIfActive(state);
@@ -161,10 +175,28 @@ public class WorkflowEngine {
             for (PendingAppend p : pending) {
                 cacheIfActive(p.state());
                 metrics.recordEvents(p.state(), p.events());
-                afterCommit(p.state(), p.events());
+                // Publish follow-ups inside the span of the input that caused them, so traceparent flows on.
+                try (Tracer.SpanInScope ws = tracer.withSpan(spanOf.get(p.state().workflowId()))) {
+                    afterCommit(p.state(), p.events());
+                }
             }
         });
-        if (fallback[0]) inputs.forEach(this::run);
+        try {
+            if (fallback[0]) {
+                for (Input in : inputs) {
+                    try (Tracer.SpanInScope ws = tracer.withSpan(in.span())) {
+                        run(in);
+                    }
+                }
+            }
+        } finally {
+            for (Input in : inputs) {
+                if (in.span() != null) {
+                    in.span().tag("batch.size", String.valueOf(inputs.size()));
+                    in.span().end();
+                }
+            }
+        }
     }
 
     /** Acquires monitors in list order (callers pass ascending stripe order), then runs body. */

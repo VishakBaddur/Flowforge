@@ -13,6 +13,7 @@ import com.flowforge.common.messaging.Topics;
 import com.flowforge.common.messaging.WorkflowCommand;
 import com.flowforge.common.model.WorkflowDefinition;
 import com.flowforge.common.state.WorkflowState;
+import com.flowforge.common.tracing.KafkaTraceContext;
 import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -35,9 +36,12 @@ public class WorkflowService {
     private final WorkflowRunRepository runs;
     private final WorkflowEventRepository events;
     private final Clock clock;
+    private final KafkaTraceContext trace;
 
     public WorkflowService(KafkaTemplate<String, String> kafka, JsonMapper json, EventCodec codec,
-                           WorkflowRunRepository runs, WorkflowEventRepository events, Clock clock) {
+                           WorkflowRunRepository runs, WorkflowEventRepository events, Clock clock,
+                           KafkaTraceContext trace) {
+        this.trace = trace;
         this.kafka = kafka;
         this.json = json;
         this.codec = codec;
@@ -93,7 +97,8 @@ public class WorkflowService {
     private void publish(String workflowId, WorkflowCommand command) {
         try {
             // Wait for the broker ack so "202 Accepted" really means the command is durable.
-            kafka.send(Topics.WORKFLOW_COMMANDS, workflowId, json.writeValueAsString(command)).get(5, TimeUnit.SECONDS);
+            kafka.send(trace.record(Topics.WORKFLOW_COMMANDS, workflowId, json.writeValueAsString(command), null))
+                    .get(5, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("interrupted while publishing", e);

@@ -3,6 +3,8 @@ package com.flowforge.orchestrator.engine;
 import com.flowforge.common.messaging.TaskResult;
 import com.flowforge.common.messaging.Topics;
 import com.flowforge.common.messaging.WorkflowCommand;
+import com.flowforge.common.tracing.KafkaTraceContext;
+import io.micrometer.tracing.Span;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.TopicPartition;
 import org.slf4j.Logger;
@@ -30,8 +32,10 @@ public class OrchestratorListener implements ConsumerSeekAware {
 
     private final WorkflowEngine engine;
     private final JsonMapper json;
+    private final KafkaTraceContext trace;
 
-    public OrchestratorListener(WorkflowEngine engine, JsonMapper json) {
+    public OrchestratorListener(WorkflowEngine engine, JsonMapper json, KafkaTraceContext trace) {
+        this.trace = trace;
         this.engine = engine;
         this.json = json;
     }
@@ -40,15 +44,31 @@ public class OrchestratorListener implements ConsumerSeekAware {
     public void onBatch(List<ConsumerRecord<String, String>> records) {
         List<WorkflowEngine.Input> inputs = new ArrayList<>(records.size());
         for (ConsumerRecord<String, String> record : records) {
+            Span span = trace.startConsumerSpan("orchestrator " + record.topic(), record.headers());
+            span.tag("workflow.id", String.valueOf(record.key()));
             try {
                 switch (record.topic()) {
-                    case Topics.WORKFLOW_COMMANDS -> inputs.add(engine.inputFor(json.readValue(record.value(), WorkflowCommand.class)));
-                    case Topics.TASK_RESULTS -> inputs.add(engine.inputFor(json.readValue(record.value(), TaskResult.class)));
-                    default -> log.warn("Unexpected topic {}", record.topic());
+                    case Topics.WORKFLOW_COMMANDS -> {
+                        WorkflowCommand c = json.readValue(record.value(), WorkflowCommand.class);
+                        span.name("orchestrator " + c.kind());
+                        inputs.add(engine.inputFor(c).withSpan(span));
+                    }
+                    case Topics.TASK_RESULTS -> {
+                        TaskResult r = json.readValue(record.value(), TaskResult.class);
+                        span.name("orchestrator " + r.kind() + " " + r.taskId())
+                                .tag("task.id", r.taskId()).tag("attempt", String.valueOf(r.attempt()));
+                        inputs.add(engine.inputFor(r).withSpan(span));
+                    }
+                    default -> {
+                        log.warn("Unexpected topic {}", record.topic());
+                        span.end();
+                    }
                 }
             } catch (RuntimeException e) {
                 // A single unreadable record must not poison the whole batch.
                 log.error("Skipping unreadable record {}-{}@{}: {}", record.topic(), record.partition(), record.offset(), e.getMessage());
+                span.error(e);
+                span.end();
             }
         }
         engine.handleBatch(inputs);

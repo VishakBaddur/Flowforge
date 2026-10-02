@@ -50,3 +50,15 @@ management:
   metrics:
     tags:
       application: ${spring.application.name}
+  tracing:
+    sampling:
+      probability: ${FLOWFORGE_TRACE_SAMPLING:0.1}   # parent-based: a sampled workflow is traced end to end
+  opentelemetry:
+    tracing:
+      export:
+        otlp:
+          endpoint: http://localhost:4318/v1/traces
+  otlp:
+    metrics:
+      export:
+        enabled: false   # metrics go to Prometheus; Jaeger only accepts traces

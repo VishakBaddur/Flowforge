@@ -1,6 +1,9 @@
 package com.flowforge.api.config;
 
 import com.flowforge.common.event.EventCodec;
+import com.flowforge.common.tracing.KafkaTraceContext;
+import io.micrometer.tracing.Tracer;
+import io.micrometer.tracing.propagation.Propagator;
 import org.springframework.cache.annotation.CachingConfigurer;
 import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.cache.interceptor.CacheErrorHandler;
@@ -29,5 +32,10 @@ public class ApiConfig implements CachingConfigurer {
     @Bean
     EventCodec eventCodec(JsonMapper json) {
         return new EventCodec(json);
+    }
+
+    @Bean
+    KafkaTraceContext kafkaTraceContext(Tracer tracer, Propagator propagator) {
+        return new KafkaTraceContext(tracer, propagator);
     }
 }

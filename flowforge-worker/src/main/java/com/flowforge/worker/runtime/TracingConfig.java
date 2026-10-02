@@ -1,27 +1,13 @@
-package com.flowforge.orchestrator.engine;
+package com.flowforge.worker.runtime;
 
-import com.flowforge.common.event.EventCodec;
 import com.flowforge.common.tracing.KafkaTraceContext;
 import io.micrometer.tracing.Tracer;
 import io.micrometer.tracing.propagation.Propagator;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import tools.jackson.databind.json.JsonMapper;
-
-import java.time.Clock;
 
 @Configuration
-public class EngineConfig {
-
-    @Bean
-    Clock clock() {
-        return Clock.systemUTC();
-    }
-
-    @Bean
-    EventCodec eventCodec(JsonMapper json) {
-        return new EventCodec(json);
-    }
+public class TracingConfig {
 
     @Bean
     KafkaTraceContext kafkaTraceContext(Tracer tracer, Propagator propagator) {

@@ -99,6 +99,13 @@ services:
     depends_on:
       - prometheus
 
+  jaeger:
+    image: jaegertracing/jaeger:latest
+    container_name: ff-jaeger
+    ports:
+      - "16686:16686"   # UI
+      - "4318:4318"     # OTLP over HTTP (traces from the Spring services)
+
 volumes:
   kafka-data:
   postgres-data:
