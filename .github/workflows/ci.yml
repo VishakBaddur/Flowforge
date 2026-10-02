@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build + tests (JUnit, Testcontainers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Build and run all tests
+        run: mvn -B -ntp verify
+
+  images:
+    name: Image (${{ matrix.module }})
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [api, orchestrator, worker]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Image name (GHCR requires lowercase)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/flowforge-${{ matrix.module }}" >> "$GITHUB_ENV"
+      - name: Build jar
+        run: mvn -B -ntp -DskipTests package -pl flowforge-${{ matrix.module }} -am
+      - name: Build image
+        run: docker build --build-arg MODULE=${{ matrix.module }} -t "$IMAGE:${{ github.sha }}" .
+      - name: Scan image (fail on fixable CRITICAL vulnerabilities)
+        run: >
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:latest
+          image --quiet --severity CRITICAL --ignore-unfixed --exit-code 1 "$IMAGE:${{ github.sha }}"
+      - name: Push to GitHub Container Registry
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
