@@ -20,6 +20,9 @@ spring:
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       max-poll-records: 500
+      properties:
+        session.timeout.ms: 6000
+        heartbeat.interval.ms: 500
     listener:
       concurrency: 4
 

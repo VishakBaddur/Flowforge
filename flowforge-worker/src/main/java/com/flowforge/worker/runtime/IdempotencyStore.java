@@ -1,10 +1,13 @@
 package com.flowforge.worker.runtime;
 
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -18,6 +21,11 @@ public class IdempotencyStore {
 
     private static final Duration DONE_TTL = Duration.ofHours(24);
     private static final String DONE_MARKER = "__done";
+
+    /** Extend the claim only if this worker still owns it (atomic check-and-set). */
+    private static final RedisScript<Long> EXTEND_IF_OWNER = new DefaultRedisScript<>(
+            "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end",
+            Long.class);
 
     private final StringRedisTemplate redis;
 
@@ -44,7 +52,18 @@ public class IdempotencyStore {
     }
 
     public boolean tryClaim(String idempotencyKey, int attempt, String workerId, Duration ttl) {
-        Boolean claimed = redis.opsForValue().setIfAbsent("ff:claim:" + idempotencyKey + ":" + attempt, workerId, ttl);
+        Boolean claimed = redis.opsForValue().setIfAbsent(claimKey(idempotencyKey, attempt), workerId, ttl);
         return Boolean.TRUE.equals(claimed);
+    }
+
+    /** Returns false if the claim was lost (expired and taken by another worker). */
+    public boolean extendClaim(String idempotencyKey, int attempt, String workerId, Duration ttl) {
+        Long result = redis.execute(EXTEND_IF_OWNER, List.of(claimKey(idempotencyKey, attempt)),
+                workerId, String.valueOf(ttl.toMillis()));
+        return result != null && result == 1L;
+    }
+
+    private static String claimKey(String idempotencyKey, int attempt) {
+        return "ff:claim:" + idempotencyKey + ":" + attempt;
     }
 }

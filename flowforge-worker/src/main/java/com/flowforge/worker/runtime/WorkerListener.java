@@ -31,6 +31,11 @@ public class WorkerListener {
 
     private static final Logger log = LoggerFactory.getLogger(WorkerListener.class);
     private static final Duration LEASE_GRACE = Duration.ofSeconds(2);
+    /**
+     * Phase-1 claim lifetime. MUST be shorter than the consumer session timeout (6s): if this worker dies
+     * before STARTED is acknowledged, the claim must have expired by the time Kafka redelivers the record.
+     */
+    private static final Duration PENDING_CLAIM_TTL = Duration.ofSeconds(3);
 
     private final KafkaTemplate<String, String> kafka;
     private final JsonMapper json;
@@ -72,7 +77,7 @@ public class WorkerListener {
             }
 
             Duration lease = Duration.ofMillis(command.timeoutMillis()).plus(LEASE_GRACE);
-            if (!idempotency.tryClaim(command.idempotencyKey(), command.attempt(), workerId, lease)) {
+            if (!idempotency.tryClaim(command.idempotencyKey(), command.attempt(), workerId, PENDING_CLAIM_TTL)) {
                 log.debug("{} attempt {} already claimed by another worker", command.idempotencyKey(), command.attempt());
                 continue;
             }
@@ -84,6 +89,12 @@ public class WorkerListener {
         CompletableFuture.allOf(acks.toArray(CompletableFuture[]::new)).join();
 
         for (TaskCommand command : toRun) {
+            // Phase 2: STARTED is durable, so the orchestrator's lease now covers this attempt. Extend the claim to match.
+            Duration lease = Duration.ofMillis(command.timeoutMillis()).plus(LEASE_GRACE);
+            if (!idempotency.extendClaim(command.idempotencyKey(), command.attempt(), workerId, lease)) {
+                log.warn("Lost claim on {} attempt {} before execution; running anyway (duplicates are deduplicated)",
+                        command.idempotencyKey(), command.attempt());
+            }
             inFlight.acquireUninterruptibly();   // backpressure: blocks the consumer when saturated
             executor.execute(() -> {
                 try {
