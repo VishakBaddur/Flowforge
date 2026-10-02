@@ -76,6 +76,14 @@ class DagValidatorTest {
     }
 
     @Test
+    void reportsCycleAlongsideReferenceErrors() {
+        assertThatThrownBy(() -> DagValidator.validate(wf(task("a", "b"), task("b", "a"), task("c", "ghost"))))
+                .isInstanceOfSatisfying(InvalidWorkflowException.class, e -> assertThat(e.errors()).containsExactly(
+                        "task 'c' depends on unknown task 'ghost'",
+                        "cycle detected (depends on): a -> b -> a"));
+    }
+
+    @Test
     void handlesLargeChainWithoutStackOverflow() {
         List<TaskDefinition> tasks = new ArrayList<>();
         tasks.add(task("t0"));

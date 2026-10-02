@@ -1,0 +1,8 @@
+{
+  "name": "broken",
+  "tasks": [
+    { "id": "a", "type": "noop", "dependsOn": ["b"] },
+    { "id": "b", "type": "noop", "dependsOn": ["a"] },
+    { "id": "c", "type": "noop", "dependsOn": ["ghost"] }
+  ]
+}

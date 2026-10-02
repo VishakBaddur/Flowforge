@@ -39,8 +39,6 @@ public final class DagValidator {
                 }
             }
         }
-        if (!errors.isEmpty()) throw new InvalidWorkflowException(errors);
-
         Map<String, Integer> indegree = new HashMap<>();
         Map<String, List<String>> dependents = new LinkedHashMap<>();
         for (String id : byId.keySet()) {
@@ -49,6 +47,7 @@ public final class DagValidator {
         }
         for (TaskDefinition t : byId.values()) {
             for (String dep : new LinkedHashSet<>(t.dependsOn())) {   // ignore duplicate deps
+                if (dep.equals(t.id()) || !byId.containsKey(dep)) continue;   // already reported above
                 indegree.merge(t.id(), 1, Integer::sum);
                 dependents.get(dep).add(t.id());
             }
@@ -70,9 +69,9 @@ public final class DagValidator {
         }
 
         if (order.size() != byId.size()) {
-            throw new InvalidWorkflowException(List.of(
-                    "cycle detected (depends on): " + String.join(" -> ", findCycle(byId, order))));
+            errors.add("cycle detected (depends on): " + String.join(" -> ", findCycle(byId, order)));
         }
+        if (!errors.isEmpty()) throw new InvalidWorkflowException(errors);
 
         Map<String, List<String>> frozen = new LinkedHashMap<>();
         dependents.forEach((k, v) -> frozen.put(k, List.copyOf(v)));
@@ -92,8 +91,10 @@ public final class DagValidator {
         while (!indexInPath.containsKey(current)) {
             indexInPath.put(current, path.size());
             path.add(current);
-            current = byId.get(current).dependsOn().stream()
-                    .filter(d -> !done.contains(d)).findFirst().orElseThrow();
+            String from = current;
+            current = byId.get(from).dependsOn().stream()
+                    .filter(d -> !d.equals(from) && byId.containsKey(d) && !done.contains(d))
+                    .findFirst().orElseThrow();
         }
         List<String> cycle = new ArrayList<>(path.subList(indexInPath.get(current), path.size()));
         cycle.add(current);

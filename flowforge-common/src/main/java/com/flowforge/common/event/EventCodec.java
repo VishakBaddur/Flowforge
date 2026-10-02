@@ -1,7 +1,5 @@
-package com.flowforge.orchestrator.store;
+package com.flowforge.common.event;
 
-import com.flowforge.common.event.WorkflowEvent;
-import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.util.Arrays;
@@ -9,8 +7,7 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 /** JSON <-> WorkflowEvent. The type registry is derived from the sealed interface, so new events need no wiring. */
-@Component
-public class EventCodec {
+public final class EventCodec {
 
     private static final Map<String, Class<? extends WorkflowEvent>> TYPES =
             Arrays.stream(WorkflowEvent.class.getPermittedSubclasses())

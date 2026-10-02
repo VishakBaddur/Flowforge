@@ -10,17 +10,19 @@ public record TaskDefinition(
         String type,
         Map<String, String> input,
         List<String> dependsOn,
-        int maxRetries,
+        Integer maxRetries,
         Duration timeout,
         BackoffPolicy backoff) {
 
     public static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
+    public static final int DEFAULT_MAX_RETRIES = 3;
 
     public TaskDefinition {
         if (id == null || id.isBlank())
             throw new IllegalArgumentException("task id is required");
         if (type == null || type.isBlank())
             throw new IllegalArgumentException("task type is required (task '" + id + "')");
+        maxRetries = maxRetries == null ? DEFAULT_MAX_RETRIES : maxRetries;
         if (maxRetries < 0)
             throw new IllegalArgumentException("maxRetries must be >= 0 (task '" + id + "')");
         input = input == null ? Map.of() : Map.copyOf(input);

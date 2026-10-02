@@ -1,0 +1,9 @@
+{
+  "name": "order-pipeline",
+  "tasks": [
+    { "id": "validate",  "type": "sleep", "input": { "ms": "200" } },
+    { "id": "reserve",   "type": "flaky", "input": { "failureRate": "0.6" }, "dependsOn": ["validate"], "maxRetries": 6 },
+    { "id": "price",     "type": "noop",  "dependsOn": ["validate"] },
+    { "id": "confirm",   "type": "sleep", "input": { "ms": "100" }, "dependsOn": ["reserve", "price"], "maxRetries": 2 }
+  ]
+}

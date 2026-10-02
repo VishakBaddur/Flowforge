@@ -1,5 +1,33 @@
 spring:
   application:
     name: flowforge-api
+  datasource:
+    url: jdbc:postgresql://localhost:5433/flowforge
+    username: flowforge
+    password: flowforge
+    hikari:
+      maximum-pool-size: 10
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: none        # schema is owned by the orchestrator's Flyway migrations
+  kafka:
+    bootstrap-servers: localhost:9092
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+  data:
+    redis:
+      host: localhost
+      port: 6380
+  cache:
+    type: redis
+    redis:
+      time-to-live: 10m
+      cache-null-values: false
+
 server:
   port: 8080

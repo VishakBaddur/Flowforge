@@ -1,6 +1,7 @@
-package com.flowforge.orchestrator.engine;
+package com.flowforge.api.config;
 
 import com.flowforge.common.event.EventCodec;
+import org.springframework.cache.annotation.EnableCaching;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import tools.jackson.databind.json.JsonMapper;
@@ -8,7 +9,8 @@ import tools.jackson.databind.json.JsonMapper;
 import java.time.Clock;
 
 @Configuration
-public class EngineConfig {
+@EnableCaching
+public class ApiConfig {
 
     @Bean
     Clock clock() {

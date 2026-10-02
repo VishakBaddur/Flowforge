@@ -1,5 +1,6 @@
 package com.flowforge.orchestrator.store;
 
+import com.flowforge.common.event.EventCodec;
 import com.flowforge.common.event.WorkflowEvent;
 import com.flowforge.common.state.WorkflowState;
 import org.springframework.dao.DuplicateKeyException;

@@ -4,7 +4,7 @@ spring:
   data:
     redis:
       host: localhost
-      port: 6379
+      port: 6380
   kafka:
     bootstrap-servers: localhost:9092
     producer:
