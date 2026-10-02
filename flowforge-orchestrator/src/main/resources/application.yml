@@ -1,5 +1,11 @@
 spring:
   application:
     name: flowforge-orchestrator
+  datasource:
+    url: jdbc:postgresql://localhost:5432/flowforge
+    username: flowforge
+    password: flowforge
+    hikari:
+      maximum-pool-size: 20
 server:
   port: 8081
