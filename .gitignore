@@ -1,0 +1,18 @@
+# Build output
+target/
+*.class
+*.jar
+*.original
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.code-workspace
+
+# OS
+.DS_Store
+
+# Logs and env
+*.log
+.env

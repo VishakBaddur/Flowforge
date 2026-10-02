@@ -1,0 +1,5 @@
+spring:
+  application:
+    name: flowforge-orchestrator
+server:
+  port: 8081
