@@ -2,13 +2,21 @@ package com.flowforge.worker.runtime;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.flowforge.common.messaging.TaskCommand;
 import org.springframework.dao.DataAccessException;
+import org.springframework.data.redis.connection.RedisStringCommands;
+import org.springframework.data.redis.connection.ReturnType;
+import org.springframework.data.redis.core.RedisCallback;
+import org.springframework.data.redis.core.types.Expiration;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.script.RedisScript;
 import org.springframework.stereotype.Component;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.function.Function;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,9 +42,13 @@ public class IdempotencyStore {
     private static final long OPEN_CIRCUIT_MS = 5_000;
 
     /** Extend the claim only if this worker still owns it (atomic check-and-set). */
-    private static final RedisScript<Long> EXTEND_IF_OWNER = new DefaultRedisScript<>(
-            "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end",
-            Long.class);
+    private static final String EXTEND_LUA =
+            "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end";
+    private static final RedisScript<Long> EXTEND_IF_OWNER = new DefaultRedisScript<>(EXTEND_LUA, Long.class);
+
+    public enum Prep { CACHED, CLAIMED, TAKEN }
+
+    public record Prepared(TaskCommand command, Prep outcome, Map<String, String> cachedOutput) {}
 
     private final StringRedisTemplate redis;
     private volatile long skipUntil = 0;
@@ -58,15 +70,74 @@ public class IdempotencyStore {
         }, Optional.empty());
     }
 
+    /** HSET + EXPIRE in one pipelined round trip. */
     public void markCompleted(String idempotencyKey, Map<String, String> output) {
         guarded("write result cache", () -> {
-            String key = "ff:done:" + idempotencyKey;
-            Map<String, String> hash = new HashMap<>(output);
-            hash.put(DONE_MARKER, "1");
-            redis.opsForHash().putAll(key, hash);
-            redis.expire(key, DONE_TTL);
+            byte[] key = bytes("ff:done:" + idempotencyKey);
+            Map<byte[], byte[]> hash = new HashMap<>();
+            output.forEach((k, v) -> hash.put(bytes(k), bytes(v)));
+            hash.put(bytes(DONE_MARKER), bytes("1"));
+            redis.executePipelined((RedisCallback<Object>) conn -> {
+                conn.hashCommands().hMSet(key, hash);
+                conn.keyCommands().expire(key, DONE_TTL.toSeconds());
+                return null;
+            });
             return null;
         }, null);
+    }
+
+    /**
+     * ONE round trip for a whole poll batch: result-cache lookup + phase-1 claim for every command.
+     * Redis down => every command is treated as CLAIMED with no cache (attempt numbers still guarantee outcomes).
+     */
+    public List<Prepared> prepare(List<TaskCommand> commands, String workerId, Duration claimTtl) {
+        List<Prepared> degraded = commands.stream().map(c -> new Prepared(c, Prep.CLAIMED, null)).toList();
+        if (commands.isEmpty()) return degraded;
+        return guarded("prepare batch", () -> {
+            List<Object> results = redis.executePipelined((RedisCallback<Object>) conn -> {
+                for (TaskCommand c : commands) {
+                    conn.hashCommands().hGetAll(bytes("ff:done:" + c.idempotencyKey()));
+                    conn.stringCommands().set(bytes(claimKey(c.idempotencyKey(), c.attempt())), bytes(workerId),
+                            Expiration.from(claimTtl), RedisStringCommands.SetOption.ifAbsent());
+                }
+                return null;
+            });
+            List<Prepared> out = new ArrayList<>(commands.size());
+            for (int i = 0; i < commands.size(); i++) {
+                Map<?, ?> done = (Map<?, ?>) results.get(2 * i);
+                if (done != null && !done.isEmpty()) {
+                    Map<String, String> output = new HashMap<>();
+                    done.forEach((k, v) -> {
+                        if (!DONE_MARKER.equals(k)) output.put(String.valueOf(k), String.valueOf(v));
+                    });
+                    out.add(new Prepared(commands.get(i), Prep.CACHED, output));
+                } else {
+                    boolean claimed = Boolean.TRUE.equals(results.get(2 * i + 1));
+                    out.add(new Prepared(commands.get(i), claimed ? Prep.CLAIMED : Prep.TAKEN, null));
+                }
+            }
+            return out;
+        }, degraded);
+    }
+
+    /** Phase 2 for a whole batch in ONE round trip: extend each claim to the full lease if still ours. */
+    public void extendClaims(List<TaskCommand> commands, String workerId, Function<TaskCommand, Duration> lease) {
+        if (commands.isEmpty()) return;
+        guarded("extend claims", () -> {
+            redis.executePipelined((RedisCallback<Object>) conn -> {
+                for (TaskCommand c : commands) {
+                    conn.scriptingCommands().eval(bytes(EXTEND_LUA), ReturnType.INTEGER, 1,
+                            bytes(claimKey(c.idempotencyKey(), c.attempt())), bytes(workerId),
+                            bytes(String.valueOf(lease.apply(c).toMillis())));
+                }
+                return null;
+            });
+            return null;
+        }, null);
+    }
+
+    private static byte[] bytes(String s) {
+        return s.getBytes(StandardCharsets.UTF_8);
     }
 
     /** Fallback when Redis is down: proceed without a claim (duplicates are deduplicated by attempt number). */

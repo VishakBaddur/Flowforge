@@ -65,6 +65,29 @@ public class EventStore {
                 Timestamp.from(state.startedAt()), Timestamp.from(events.getLast().occurredAt()));
     }
 
+    /** Appends events for MANY workflows in ONE transaction (the batched orchestrator path). */
+    @Transactional
+    public void appendAll(List<PendingAppend> appends) {
+        if (appends.isEmpty()) return;
+        List<Object[]> eventRows = new ArrayList<>();
+        List<Object[]> runRows = new ArrayList<>(appends.size());
+        for (PendingAppend a : appends) {
+            WorkflowState state = a.state();
+            long sequence = state.version() - a.events().size();
+            for (WorkflowEvent e : a.events()) {
+                eventRows.add(new Object[]{state.workflowId(), ++sequence, e.type(), codec.encode(e), Timestamp.from(e.occurredAt())});
+            }
+            runRows.add(new Object[]{state.workflowId(), state.definition().name(), state.owner(), state.status().name(),
+                    state.version(), Timestamp.from(state.startedAt()), Timestamp.from(a.events().getLast().occurredAt())});
+        }
+        try {
+            jdbc.batchUpdate(INSERT_EVENT, eventRows);
+        } catch (DuplicateKeyException ex) {
+            throw new ConcurrencyConflictException("batch of " + appends.size() + " workflows", -1, ex);
+        }
+        jdbc.batchUpdate(UPSERT_RUN, runRows);
+    }
+
     public List<WorkflowEvent> load(String workflowId) {
         return jdbc.query(
                 "SELECT event_type, payload::text FROM workflow_events WHERE workflow_id = ? ORDER BY sequence",

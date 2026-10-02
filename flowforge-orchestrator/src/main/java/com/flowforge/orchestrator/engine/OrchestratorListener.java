@@ -12,14 +12,16 @@ import org.springframework.kafka.listener.ConsumerSeekAware;
 import org.springframework.stereotype.Component;
 import tools.jackson.databind.json.JsonMapper;
 
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
- * One listener for BOTH topics, so with the RangeAssignor the same consumer owns partition N of each:
- * every command and result for a given workflow is handled by one instance, in order.
+ * One BATCH listener for both topics. With the RangeAssignor the same consumer owns partition N of each,
+ * so every command and result for a given workflow is handled by one instance, in order.
  */
 @Component
 public class OrchestratorListener implements ConsumerSeekAware {
@@ -34,13 +36,22 @@ public class OrchestratorListener implements ConsumerSeekAware {
         this.json = json;
     }
 
-    @KafkaListener(topics = {Topics.WORKFLOW_COMMANDS, Topics.TASK_RESULTS})
-    public void onMessage(ConsumerRecord<String, String> record) {
-        switch (record.topic()) {
-            case Topics.WORKFLOW_COMMANDS -> engine.handle(json.readValue(record.value(), WorkflowCommand.class));
-            case Topics.TASK_RESULTS -> engine.handle(json.readValue(record.value(), TaskResult.class));
-            default -> log.warn("Unexpected topic {}", record.topic());
+    @KafkaListener(topics = {Topics.WORKFLOW_COMMANDS, Topics.TASK_RESULTS}, batch = "true")
+    public void onBatch(List<ConsumerRecord<String, String>> records) {
+        List<WorkflowEngine.Input> inputs = new ArrayList<>(records.size());
+        for (ConsumerRecord<String, String> record : records) {
+            try {
+                switch (record.topic()) {
+                    case Topics.WORKFLOW_COMMANDS -> inputs.add(engine.inputFor(json.readValue(record.value(), WorkflowCommand.class)));
+                    case Topics.TASK_RESULTS -> inputs.add(engine.inputFor(json.readValue(record.value(), TaskResult.class)));
+                    default -> log.warn("Unexpected topic {}", record.topic());
+                }
+            } catch (RuntimeException e) {
+                // A single unreadable record must not poison the whole batch.
+                log.error("Skipping unreadable record {}-{}@{}: {}", record.topic(), record.partition(), record.offset(), e.getMessage());
+            }
         }
+        engine.handleBatch(inputs);
     }
 
     @Override

@@ -66,41 +66,45 @@ public class WorkerListener {
     public void onBatch(List<ConsumerRecord<String, String>> records) {
         metrics.batch(records.size());
         Instant now = clock.instant();
+        List<TaskCommand> commands = new ArrayList<>(records.size());
+        for (ConsumerRecord<String, String> record : records) {
+            try {
+                commands.add(json.readValue(record.value(), TaskCommand.class));
+            } catch (RuntimeException e) {
+                log.error("Skipping unreadable task record {}-{}@{}: {}", record.topic(), record.partition(), record.offset(), e.getMessage());
+            }
+        }
+
+        // Phase 1 for the whole batch in ONE Redis round trip: result-cache lookup + short claim.
         List<TaskCommand> toRun = new ArrayList<>();
         List<CompletableFuture<?>> acks = new ArrayList<>();
-
-        for (ConsumerRecord<String, String> record : records) {
-            TaskCommand command = json.readValue(record.value(), TaskCommand.class);
-
-            Optional<Map<String, String>> done = idempotency.completedOutput(command.idempotencyKey());
-            if (done.isPresent()) {
-                log.info("{} already completed; replaying cached result for attempt {}",
-                        command.idempotencyKey(), command.attempt());
-                metrics.cacheReplay();
-                acks.add(send(TaskResult.succeeded(command, workerId, done.get(), now)));
-                continue;
+        for (IdempotencyStore.Prepared p : idempotency.prepare(commands, workerId, PENDING_CLAIM_TTL)) {
+            TaskCommand command = p.command();
+            switch (p.outcome()) {
+                case CACHED -> {
+                    log.info("{} already completed; replaying cached result for attempt {}",
+                            command.idempotencyKey(), command.attempt());
+                    metrics.cacheReplay();
+                    acks.add(send(TaskResult.succeeded(command, workerId, p.cachedOutput(), now)));
+                }
+                case TAKEN -> {
+                    log.debug("{} attempt {} already claimed by another worker", command.idempotencyKey(), command.attempt());
+                    metrics.claimSkipped();
+                }
+                case CLAIMED -> {
+                    acks.add(send(TaskResult.started(command, workerId, now.plus(lease(command)), now)));
+                    toRun.add(command);
+                }
             }
-
-            Duration lease = Duration.ofMillis(command.timeoutMillis()).plus(LEASE_GRACE);
-            if (!idempotency.tryClaim(command.idempotencyKey(), command.attempt(), workerId, PENDING_CLAIM_TTL)) {
-                log.debug("{} attempt {} already claimed by another worker", command.idempotencyKey(), command.attempt());
-                metrics.claimSkipped();
-                continue;
-            }
-            acks.add(send(TaskResult.started(command, workerId, now.plus(lease), now)));
-            toRun.add(command);
         }
 
         // STARTED must be durable before we return and Kafka commits these offsets.
         CompletableFuture.allOf(acks.toArray(CompletableFuture[]::new)).join();
 
+        // Phase 2 for the whole batch in ONE round trip: the orchestrator's lease now covers these attempts.
+        idempotency.extendClaims(toRun, workerId, WorkerListener::lease);
+
         for (TaskCommand command : toRun) {
-            // Phase 2: STARTED is durable, so the orchestrator's lease now covers this attempt. Extend the claim to match.
-            Duration lease = Duration.ofMillis(command.timeoutMillis()).plus(LEASE_GRACE);
-            if (!idempotency.extendClaim(command.idempotencyKey(), command.attempt(), workerId, lease)) {
-                log.warn("Lost claim on {} attempt {} before execution; running anyway (duplicates are deduplicated)",
-                        command.idempotencyKey(), command.attempt());
-            }
             inFlight.acquireUninterruptibly();   // backpressure: blocks the consumer when saturated
             executor.execute(() -> {
                 try {
@@ -110,6 +114,10 @@ public class WorkerListener {
                 }
             });
         }
+    }
+
+    private static Duration lease(TaskCommand command) {
+        return Duration.ofMillis(command.timeoutMillis()).plus(LEASE_GRACE);
     }
 
     private void execute(TaskCommand command) {

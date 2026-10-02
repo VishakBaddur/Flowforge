@@ -49,6 +49,11 @@ public class EngineMetrics {
         recovery = histogram("flowforge.recovery.duration", "State rebuild time after partitions are assigned");
         recoveredWorkflows = DistributionSummary.builder("flowforge.recovery.workflows")
                 .description("Workflows rebuilt per recovery").register(registry);
+        // Register up front: a series first created mid-burst is invisible to Prometheus increase().
+        for (String status : List.of("COMPLETED", "FAILED", "CANCELLED")) {
+            registry.counter("flowforge.workflows.finished", "status", status);
+            workflowTimer(status);
+        }
     }
 
     private Timer histogram(String name, String description) {
@@ -116,12 +121,15 @@ public class EngineMetrics {
 
     private void finished(WorkflowState state, String status, Instant at) {
         registry.counter("flowforge.workflows.finished", "status", status).increment();
-        Timer.builder("flowforge.workflow.duration").tag("status", status)
+        workflowTimer(status).record(Duration.between(state.startedAt(), at));
+    }
+
+    private Timer workflowTimer(String status) {
+        return Timer.builder("flowforge.workflow.duration").tag("status", status)
                 .publishPercentileHistogram()
                 .minimumExpectedValue(Duration.ofMillis(10))
                 .maximumExpectedValue(Duration.ofMinutes(10))
-                .register(registry)
-                .record(Duration.between(state.startedAt(), at));
+                .register(registry);
     }
 
     private static void since(Instant from, Instant to, Timer timer) {

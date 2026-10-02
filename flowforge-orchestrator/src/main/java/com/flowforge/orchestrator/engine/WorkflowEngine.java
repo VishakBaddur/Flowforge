@@ -15,6 +15,7 @@ import com.flowforge.common.state.WorkflowDecider;
 import com.flowforge.common.state.WorkflowState;
 import com.flowforge.orchestrator.store.ConcurrencyConflictException;
 import com.flowforge.orchestrator.store.EventStore;
+import com.flowforge.orchestrator.store.PendingAppend;
 import com.flowforge.orchestrator.store.WorkflowRepository;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
@@ -24,7 +25,9 @@ import org.springframework.stereotype.Service;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -75,23 +78,103 @@ public class WorkflowEngine {
 
     // ------------------------------------------------------------------ inputs
 
-    public void handle(WorkflowCommand command) {
+    /** One unit of work for a workflow: what to decide once its state is loaded. */
+    public record Input(String workflowId, boolean createIfMissing, Function<WorkflowState, Decision> action) {}
+
+    public Input inputFor(WorkflowCommand command) {
         Instant now = clock.instant();
-        switch (command.kind()) {
-            case START -> execute(command.workflowId(), true, s -> decider.start(s, command.definition(), command.owner(), now));
-            case CANCEL -> execute(command.workflowId(), false, s -> decider.cancel(s, command.reason(), now));
-        }
+        return switch (command.kind()) {
+            case START -> new Input(command.workflowId(), true,
+                    s -> decider.start(s, command.definition(), command.owner(), now));
+            case CANCEL -> new Input(command.workflowId(), false, s -> decider.cancel(s, command.reason(), now));
+        };
     }
 
-    public void handle(TaskResult r) {
+    public Input inputFor(TaskResult r) {
         Instant now = clock.instant();
-        switch (r.kind()) {
-            case STARTED -> execute(r.workflowId(), false,
+        return switch (r.kind()) {
+            case STARTED -> new Input(r.workflowId(), false,
                     s -> decider.taskStarted(s, r.taskId(), r.attempt(), r.workerId(), r.leaseExpiresAt(), now));
-            case SUCCEEDED -> execute(r.workflowId(), false,
+            case SUCCEEDED -> new Input(r.workflowId(), false,
                     s -> decider.taskSucceeded(s, r.taskId(), r.attempt(), r.output(), now));
-            case FAILED -> execute(r.workflowId(), false,
+            case FAILED -> new Input(r.workflowId(), false,
                     s -> decider.taskFailed(s, r.taskId(), r.attempt(), r.error(), now));
+        };
+    }
+
+    public void handle(WorkflowCommand command) {
+        run(inputFor(command));
+    }
+
+    public void handle(TaskResult result) {
+        run(inputFor(result));
+    }
+
+    private void run(Input in) {
+        execute(in.workflowId(), in.createIfMissing(), in.action());
+    }
+
+    /**
+     * Batched path: decide every input of a Kafka poll in memory, commit ALL resulting events in ONE
+     * Postgres transaction, then publish. Holds the stripe locks of every workflow involved, acquired in
+     * ascending order so concurrent batches and timers cannot deadlock. On ANY failure the transaction rolls
+     * back, the in-memory changes are discarded, and the batch is replayed one input at a time (the
+     * per-message path proven by the failure tests).
+     */
+    public void handleBatch(List<Input> inputs) {
+        if (inputs.isEmpty()) return;
+        Map<String, List<Input>> byWorkflow = new LinkedHashMap<>();
+        for (Input in : inputs) byWorkflow.computeIfAbsent(in.workflowId(), k -> new ArrayList<>()).add(in);
+        List<Object> stripes = byWorkflow.keySet().stream()
+                .map(this::stripeOf).distinct().sorted().map(i -> locks[i]).toList();
+
+        boolean[] fallback = {false};
+        withLocks(stripes, 0, () -> {
+            List<PendingAppend> pending = new ArrayList<>();
+            try {
+                for (Map.Entry<String, List<Input>> entry : byWorkflow.entrySet()) {
+                    String id = entry.getKey();
+                    boolean create = entry.getValue().stream().anyMatch(Input::createIfMissing);
+                    WorkflowState state = cache.get(id);
+                    if (state == null) state = repository.load(id).orElse(create ? new WorkflowState(id) : null);
+                    if (state == null) {
+                        log.warn("Ignoring input for unknown workflow {}", id);
+                        continue;
+                    }
+                    List<WorkflowEvent> events = new ArrayList<>();
+                    for (Input in : entry.getValue()) {
+                        Decision d = in.action().apply(state);
+                        if (d.isIgnored()) metrics.ignored(d.ignoredReason());
+                        else events.addAll(d.events());
+                    }
+                    if (events.isEmpty()) cacheIfActive(state);
+                    else pending.add(new PendingAppend(state, events));
+                }
+                metrics.timeAppend(() -> store.appendAll(pending));
+            } catch (RuntimeException e) {
+                byWorkflow.keySet().forEach(cache::remove);   // in-memory state may hold uncommitted events
+                log.info("Batch of {} inputs not committed ({}: {}); replaying one at a time",
+                        inputs.size(), e.getClass().getSimpleName(), e.getMessage());
+                fallback[0] = true;
+                return;
+            }
+            for (PendingAppend p : pending) {
+                cacheIfActive(p.state());
+                metrics.recordEvents(p.state(), p.events());
+                afterCommit(p.state(), p.events());
+            }
+        });
+        if (fallback[0]) inputs.forEach(this::run);
+    }
+
+    /** Acquires monitors in list order (callers pass ascending stripe order), then runs body. */
+    private static void withLocks(List<Object> locks, int i, Runnable body) {
+        if (i == locks.size()) {
+            body.run();
+            return;
+        }
+        synchronized (locks.get(i)) {
+            withLocks(locks, i + 1, body);
         }
     }
 
@@ -304,8 +387,12 @@ public class WorkflowEngine {
         return a.isAfter(b) ? a : b;
     }
 
+    private int stripeOf(String workflowId) {
+        return Math.floorMod(workflowId.hashCode(), LOCK_STRIPES);
+    }
+
     private Object lockFor(String workflowId) {
-        return locks[Math.floorMod(workflowId.hashCode(), LOCK_STRIPES)];
+        return locks[stripeOf(workflowId)];
     }
 
     @PreDestroy
