@@ -5,6 +5,8 @@ spring:
     redis:
       host: localhost
       port: 6380
+      timeout: 500ms           # fail fast: Redis is an optimization, never a blocker
+      connect-timeout: 500ms
   kafka:
     bootstrap-servers: localhost:9092
     producer:
