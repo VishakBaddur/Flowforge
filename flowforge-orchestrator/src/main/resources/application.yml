@@ -25,6 +25,9 @@ spring:
       properties:
         # Co-partitioning: partition N of workflow-commands and task-results go to the same instance.
         partition.assignment.strategy: org.apache.kafka.clients.consumer.RangeAssignor
+        # Detect a crashed orchestrator in ~6s instead of the 45s default (6s is the broker minimum).
+        session.timeout.ms: 6000
+        heartbeat.interval.ms: 500
     listener:
       concurrency: 3
 

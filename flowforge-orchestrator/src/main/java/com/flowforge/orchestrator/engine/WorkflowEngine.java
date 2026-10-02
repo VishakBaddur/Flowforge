@@ -46,6 +46,8 @@ public class WorkflowEngine {
     private static final int LOCK_STRIPES = 1024;
     private static final int MAX_CONFLICT_RETRIES = 3;
     private static final Duration REPUBLISH_DELAY = Duration.ofSeconds(1);
+    /** After a takeover, results produced while the partition had no owner are still unread in Kafka. */
+    private static final Duration RECOVERY_LEASE_GRACE = Duration.ofSeconds(10);
 
     private final WorkflowRepository repository;
     private final EventStore store;
@@ -201,7 +203,9 @@ public class WorkflowEngine {
         for (TaskState t : state.tasks().values()) {
             switch (t.status()) {
                 case QUEUED -> publishTask(state, t.taskId(), t.attempt());
-                case RUNNING -> scheduleLeaseCheck(id, t.taskId(), t.attempt(), t.leaseExpiresAt());
+                // Don't expire leases until the result backlog has had a chance to drain.
+                case RUNNING -> scheduleLeaseCheck(id, t.taskId(), t.attempt(),
+                        latest(t.leaseExpiresAt(), clock.instant().plus(RECOVERY_LEASE_GRACE)));
                 case RETRY_WAIT -> scheduleRetry(id, t.taskId(), t.retryAt());
                 default -> { }
             }
@@ -282,6 +286,10 @@ public class WorkflowEngine {
                 log.error("Timer task failed", e);
             }
         }, delayMs, TimeUnit.MILLISECONDS);
+    }
+
+    private static Instant latest(Instant a, Instant b) {
+        return a.isAfter(b) ? a : b;
     }
 
     private Object lockFor(String workflowId) {

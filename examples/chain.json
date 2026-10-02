@@ -1,0 +1,10 @@
+{
+  "name": "chain-5x1s",
+  "tasks": [
+    { "id": "step-1", "type": "sleep", "input": { "ms": "1000" }, "timeout": "PT5S" },
+    { "id": "step-2", "type": "sleep", "input": { "ms": "1000" }, "timeout": "PT5S", "dependsOn": ["step-1"] },
+    { "id": "step-3", "type": "sleep", "input": { "ms": "1000" }, "timeout": "PT5S", "dependsOn": ["step-2"] },
+    { "id": "step-4", "type": "sleep", "input": { "ms": "1000" }, "timeout": "PT5S", "dependsOn": ["step-3"] },
+    { "id": "step-5", "type": "sleep", "input": { "ms": "1000" }, "timeout": "PT5S", "dependsOn": ["step-4"] }
+  ]
+}
