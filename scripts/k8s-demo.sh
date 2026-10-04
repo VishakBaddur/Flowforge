@@ -40,8 +40,8 @@ echo "Postgres connections in use: $(sql "SELECT count(*) FROM pg_stat_activity"
 
 echo; echo "################ B) autoscaling under sustained load ################"
 hpa() { $K get hpa worker -o jsonpath='{.status.currentReplicas} {.status.currentMetrics[0].resource.current.averageUtilization}'; }
-echo "waiting for workers to scale back down to the minimum (2) so the scale-up is visible..."
-for _ in $(seq 1 36); do set -- $(hpa); [ "${1:-0}" = "2" ] && break; sleep 5; done
+echo "waiting for workers to scale back down to the minimum (1) so the scale-up is visible..."
+for _ in $(seq 1 36); do set -- $(hpa); [ "${1:-0}" = "1" ] && break; sleep 5; done
 echo "start: replicas=$(hpa | cut -d' ' -f1) cpu=$(hpa | cut -d' ' -f2)%"
 python3 loadtest/load_test.py --api "$API" --workflows 2000 --width 20 --label k8s-hpa > /tmp/k8s-hpa.txt 2>&1 &
 LOAD=$!

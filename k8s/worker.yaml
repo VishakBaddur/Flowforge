@@ -4,7 +4,7 @@ metadata:
   name: worker
   labels: { app: worker }
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels: { app: worker }
   strategy:
@@ -19,6 +19,12 @@ spec:
         prometheus.io/path: /actuator/prometheus
     spec:
       terminationGracePeriodSeconds: 30
+      # Pin host.docker.internal in /etc/hosts: no DNS dependency for reaching the out-of-cluster services.
+      # (CoreDNS crashed under CPU starvation and pods failed to resolve the name at startup.)
+      # 192.168.65.254 is Docker Desktop's host gateway; in the cloud these would be real endpoints (e.g. RDS).
+      hostAliases:
+        - ip: "192.168.65.254"
+          hostnames: ["host.docker.internal"]
       containers:
         - name: worker
           image: flowforge/worker:dev
@@ -32,14 +38,17 @@ spec:
           startupProbe:
             httpGet: { path: /actuator/health/liveness, port: http }
             periodSeconds: 2
-            failureThreshold: 60
+            timeoutSeconds: 3
+            failureThreshold: 90
           livenessProbe:
             httpGet: { path: /actuator/health/liveness, port: http }
             periodSeconds: 10
-            failureThreshold: 3
+            timeoutSeconds: 3
+            failureThreshold: 6
           readinessProbe:
             httpGet: { path: /actuator/health/readiness, port: http }
             periodSeconds: 5
+            timeoutSeconds: 3
             failureThreshold: 3
 ---
 # Scale on CPU. Upper bound matters: more than 12 consumers (the partition count) would sit idle.
@@ -49,8 +58,8 @@ metadata:
   name: worker
 spec:
   scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: worker }
-  minReplicas: 2
-  maxReplicas: 4                    # local memory budget; in the cloud this could go to 12
+  minReplicas: 1
+  maxReplicas: 3                    # local memory budget (7.75 GB Docker VM); in the cloud up to 12
   metrics:
     - type: Resource
       resource:

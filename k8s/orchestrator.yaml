@@ -19,6 +19,12 @@ spec:
         prometheus.io/path: /actuator/prometheus
     spec:
       terminationGracePeriodSeconds: 30   # SIGTERM -> consumers leave the group -> fast rebalance
+      # Pin host.docker.internal in /etc/hosts: no DNS dependency for reaching the out-of-cluster services.
+      # (CoreDNS crashed under CPU starvation and pods failed to resolve the name at startup.)
+      # 192.168.65.254 is Docker Desktop's host gateway; in the cloud these would be real endpoints (e.g. RDS).
+      hostAliases:
+        - ip: "192.168.65.254"
+          hostnames: ["host.docker.internal"]
       containers:
         - name: orchestrator
           image: flowforge/orchestrator:dev
@@ -41,14 +47,17 @@ spec:
           startupProbe:
             httpGet: { path: /actuator/health/liveness, port: http }
             periodSeconds: 2
-            failureThreshold: 60          # up to 2 minutes to boot
+            timeoutSeconds: 3
+            failureThreshold: 90          # up to 2 minutes to boot
           livenessProbe:
             httpGet: { path: /actuator/health/liveness, port: http }
             periodSeconds: 10
-            failureThreshold: 3
+            timeoutSeconds: 3
+            failureThreshold: 6
           readinessProbe:
             httpGet: { path: /actuator/health/readiness, port: http }
             periodSeconds: 5
+            timeoutSeconds: 3
             failureThreshold: 3
 ---
 apiVersion: policy/v1
