@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orchestrator
+  labels: { app: orchestrator }
+spec:
+  replicas: 2                       # hot standby: Kafka rebalances partitions on failure (tested: 555ms graceful)
+  selector:
+    matchLabels: { app: orchestrator }
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+  template:
+    metadata:
+      labels: { app: orchestrator }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+        prometheus.io/path: /actuator/prometheus
+    spec:
+      terminationGracePeriodSeconds: 30   # SIGTERM -> consumers leave the group -> fast rebalance
+      containers:
+        - name: orchestrator
+          image: flowforge/orchestrator:dev
+          imagePullPolicy: IfNotPresent
+          ports: [{ name: http, containerPort: 8081 }]
+          envFrom:
+            - configMapRef: { name: flowforge-config }
+            - secretRef: { name: flowforge-secrets }
+          env:
+            - name: SPRING_DATASOURCE_URL
+              value: jdbc:postgresql://host.docker.internal:5433/flowforge?reWriteBatchedInserts=true
+            # Connection budget (Postgres max_connections = 100). Worst case during a rollout is
+            # (replicas + maxSurge) x pool: orchestrator 3 x 12 = 36, api 3 x 5 = 15 -> 51, leaving headroom.
+            # 12 = one per Kafka consumer thread (batched decisions each hold a connection).
+            - name: SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE
+              value: "12"
+          resources:
+            requests: { cpu: 250m, memory: 512Mi }
+            limits: { cpu: "1", memory: 640Mi }
+          startupProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 2
+            failureThreshold: 60          # up to 2 minutes to boot
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: http }
+            periodSeconds: 5
+            failureThreshold: 3
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: orchestrator
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: { app: orchestrator }

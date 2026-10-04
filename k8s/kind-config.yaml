@@ -1,0 +1,9 @@
+# Local cluster: one node (Docker Desktop's memory is shared with Kafka/Postgres/Redis).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: flowforge
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080   # api NodePort -> http://localhost:8085 on the Mac
+        hostPort: 8085

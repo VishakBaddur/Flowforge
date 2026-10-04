@@ -1,0 +1,26 @@
+# Stateful services (Kafka, Postgres, Redis, Jaeger) run OUTSIDE the cluster, as managed services would
+# in the cloud (MSK, RDS, ElastiCache). Locally that's docker compose, reached via host.docker.internal.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: flowforge-config
+data:
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: host.docker.internal:9094
+  SPRING_DATA_REDIS_HOST: host.docker.internal
+  SPRING_DATA_REDIS_PORT: "6380"
+  MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT: http://host.docker.internal:4318/v1/traces
+  FLOWFORGE_TRACE_SAMPLING: "0.1"
+  # Small memory limits: leave room for metaspace, thread stacks and Netty direct buffers outside the heap.
+  JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=55 -XX:+ExitOnOutOfMemoryError"
+---
+# DEV VALUES ONLY. A real cluster would source these from a secret manager
+# (e.g. External Secrets Operator + AWS Secrets Manager) instead of committing them.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: flowforge-secrets
+type: Opaque
+stringData:
+  SPRING_DATASOURCE_USERNAME: flowforge
+  SPRING_DATASOURCE_PASSWORD: flowforge
+  FLOWFORGE_SECURITY_JWT_SECRET: dev-only-secret-change-me-0123456789abcdef0123456789
