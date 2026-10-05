@@ -12,13 +12,14 @@ import argparse
 import collections
 import datetime as dt
 import json
+import os
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
 
-API = "http://localhost:8080/api/v1"
+API = os.environ.get("FLOWFORGE_API", "http://localhost:8080/api/v1")   # e.g. the k8s API on :8085
 PIPELINE = "nyc311"
 BACKOFF = {"initialDelay": "PT2S", "multiplier": 2.0, "maxDelay": "PT30S", "jitter": True}
 

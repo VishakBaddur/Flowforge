@@ -19,14 +19,16 @@ All numbers below come from scripts in `loadtest/` and `scripts/` and can be rep
 
 | Measurement | Result |
 |---|---|
-| Sustained throughput | 12,456 tasks/s over 41 s (510,000 tasks, about 4,400 concurrent workflows), 0 lost, 0 duplicated |
-| Optimization | 14x over the first measurement (889 tasks/s) |
+| Sustained throughput | 10,066 tasks/s over 50.7 s (510,000 tasks, about 4,400 concurrent workflows, tracing on), 0 lost, 0 duplicated |
+| Optimization | 11x over the first measurement (889 to 10,066 tasks/s); 14x (to 12,456) before tracing was added |
 | Orchestrator stopped with SIGTERM | 555 ms failover, in-flight state rebuilt in 63 ms, 0 lost or duplicated |
 | Orchestrator killed with kill -9 | 6.3 s failover (Kafka's 6 s session timeout), state rebuilt in 10 ms |
 | Worker killed with kill -9 | interrupted tasks retried on another worker within about 10.6 s, 0 stuck |
 | Redis frozen for 10 s | longest stall 1.6 s, 0 extra retries |
 | Kubernetes rolling restart and pod deletion under load | 300/300 workflows completed, 0 duplicated, 0 pod restarts |
 | Tests | 39 automated tests (JUnit 5, AssertJ, Testcontainers with PostgreSQL), run in CI on every push |
+
+Across the reliability suite: 0 lost and 0 duplicated tasks.
 
 Throughput was measured end to end (REST API, Kafka, orchestrator, Kafka, worker, Redis and PostgreSQL) on a single
 laptop, using `noop` tasks in DAGs with 100 parallel tasks. Narrower DAGs batch less and run slower; 22-task DAGs
@@ -41,6 +43,7 @@ reached about 5,600 tasks/s.
 | 2 | batched decisions: one transaction per Kafka poll, with a per-message fallback | 3,036 |
 | 3 | pipelined Redis calls in the worker (claim and cache lookup for a whole batch in one round trip) | 5,615 |
 | Sustained run | same code, 510K tasks, wide DAGs | 12,456 |
+| Final architecture | same workload with tracing at 10% sampling and per-task keying | 10,066 |
 
 Each change came from the metrics. Orchestrator Kafka lag and PostgreSQL append time pointed to batching. Once
 orchestrator lag reached zero, worker lag pointed to Redis round trips.
@@ -129,6 +132,11 @@ flowchart LR
 - Finalize confirms every day loaded, rebuilds the daily aggregate, computes a checksum of the loaded facts, writes a
   run report, and advances the watermark.
 
+Retries are set per stage: extract 5 (network), transform 2, load 3 (lock conflicts) and finalize 3. Validate has
+none, because a failed data check is deterministic and retrying bad data does not fix it. One consequence: a
+transient database error during validation also goes straight to the dead-letter topic. Classifying errors as
+retryable or not, rather than configuring retries per stage, would be the cleaner design.
+
 Every stage deletes and rewrites only its own (run, day) partition in one transaction, so a retried task never
 duplicates data. Data moves between stages through PostgreSQL tables (`raw`, `staging`, `analytics`) in a separate
 `analytics` database; Flowforge passes only small task outputs between tasks.
@@ -141,13 +149,15 @@ contiguous with what is already complete. If any day fails, finalize does not ru
 | Measurement | Result |
 |---|---|
 | September 2026 backfill | 323,614 rows, 30 partitions, 122 tasks in 28.6 s (about 11,300 rows/s); the stages' combined busy time was about 490 s |
-| Accuracy | rows in the warehouse = rows reported by the API = distinct keys = 323,614 |
+| Accuracy | warehouse row count matched the API's count and the distinct natural-key count (323,614) |
 | Re-running the same backfill | 0 inserted, 0 updated, 323,614 unchanged, identical fact checksum |
 | Worker killed mid-backfill | 16 tasks retried after lease expiry; 0 inserted, identical checksum |
 | Simulated source update (100 records) | exactly 100 rows updated; the checksum returned to its original value |
 | Upstream schema change (injected on one day) | caught by the required-column check and dead-lettered; the other days loaded; watermark held |
 | Partially published day (1,114 rows against a median of 11,070) | caught by the volume check; watermark held |
 | Cleaning (September and early October) | 211 impossible close dates nulled, 432 unknown boroughs, 3,270 missing or invalid zip codes, 6,306 missing or out-of-range coordinates |
+| Docker Compose (2 worker containers) | 30,892 rows over 3 days; tasks split 7 and 7 across the containers |
+| Kubernetes (kind) | 31,574 rows over 3 days in 15.8 s; 0 pod restarts |
 
 Extraction dominates run time (about 12.8 s per day waiting on the NYC API, against 0.2 s to validate, 0.7 s to
 transform and 2.7 s to load), so a 2-day incremental run takes about as long as a 30-day backfill. Incremental runs
@@ -231,7 +241,8 @@ Errors are returned as RFC 9457 problem details.
 
 - Benchmarks ran on one laptop with every component sharing 12 cores. A real deployment would put the brokers and
   database on separate machines.
-- Tracing costs about 15-20% of throughput because of per-message context propagation, regardless of the sampling rate.
+- Tracing costs throughput because of per-message context propagation, regardless of the sampling rate: the same
+  510K-task benchmark ran at 12,456 tasks/s before tracing and 10,066 tasks/s after (about 19% on a CPU-saturated laptop).
 - Workers interrupt in-flight tasks on SIGTERM. Those tasks are retried, not lost, but draining them during the
   shutdown grace period would avoid the retries.
 - CPU is the wrong autoscaling signal for I/O-bound workers (a worker kept up at 44% CPU). Scaling on Kafka consumer
@@ -241,3 +252,4 @@ Errors are returned as RFC 9457 problem details.
   use an external identity provider and a secret manager.
 - Flowforge DAGs are fixed when submitted, so the ETL runner generates the backfill partitions up front rather
   than at run time.
+- Retries are configured per task type, not per error type (see the ETL section).
