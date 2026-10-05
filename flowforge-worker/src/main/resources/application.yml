@@ -1,6 +1,14 @@
 spring:
   application:
     name: flowforge-worker
+  datasource:
+    url: jdbc:postgresql://localhost:5433/analytics?reWriteBatchedInserts=true
+    username: flowforge
+    password: flowforge
+    hikari:
+      maximum-pool-size: 10
+  flyway:
+    locations: classpath:db/analytics
   data:
     redis:
       host: localhost
