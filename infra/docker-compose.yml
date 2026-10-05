@@ -129,10 +129,12 @@ services:
       SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       SPRING_DATA_REDIS_HOST: redis
       SPRING_DATA_REDIS_PORT: "6379"
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/analytics?reWriteBatchedInserts=true
       MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT: http://jaeger:4318/v1/traces
     depends_on:
       kafka: { condition: service_healthy }
       redis: { condition: service_healthy }
+      postgres: { condition: service_healthy }
       orchestrator: { condition: service_started }
 
   api:

@@ -42,6 +42,8 @@ class ValidateTask extends EtlTask {
         double maxMissingBorough = Double.parseDouble(in(c, "max_missing_borough_pct", "10"));
         double maxInvalidZip = Double.parseDouble(in(c, "max_invalid_zip_pct", "25"));
         double maxDuplicates = Double.parseDouble(in(c, "max_duplicate_pct", "5"));
+        double minVolumeRatio = Double.parseDouble(in(c, "min_volume_ratio", "0.5"));
+        long minHistoryDays = Long.parseLong(in(c, "min_history_days", "5"));
 
         Map<String, Object> p = jdbc.queryForMap("""
                 SELECT count(*) AS total,
@@ -67,6 +69,28 @@ class ValidateTask extends EtlTask {
         boolean countOk = total >= minRows && total <= maxRows;
         checks.put("row_count", Map.of("value", total, "min", minRows, "max", maxRows, "passed", countOk));
         if (!countOk) failures.add("row_count=" + total + " outside " + minRows + ".." + maxRows);
+
+        // Volume anomaly: compare with the trailing 14-day median of our own extract history. Catches partitions
+        // the source has not finished publishing, which a fixed min_rows cannot.
+        Map<String, Object> h = jdbc.queryForMap("""
+                SELECT count(*) AS days, percentile_cont(0.5) WITHIN GROUP (ORDER BY rows_out) AS median
+                FROM (SELECT DISTINCT ON (partition_date) partition_date, rows_out
+                      FROM etl.partition_stats
+                      WHERE stage = 'extract' AND partition_date BETWEEN ?::date - 14 AND ?::date - 1
+                      ORDER BY partition_date, updated_at DESC) history
+                """, Date.valueOf(day), Date.valueOf(day));
+        long historyDays = num(h.get("days"));
+        Number median = (Number) h.get("median");
+        if (historyDays >= minHistoryDays && median != null && median.doubleValue() > 0) {
+            double ratio = Math.round(100.0 * total / median.doubleValue()) / 100.0;
+            boolean volumeOk = ratio >= minVolumeRatio;
+            checks.put("volume_vs_trailing_median", Map.of("value", ratio, "min", minVolumeRatio,
+                    "median", median.longValue(), "history_days", historyDays, "passed", volumeOk));
+            if (!volumeOk) failures.add("volume " + total + " rows = " + ratio + "x the trailing 14-day median ("
+                    + median.longValue() + "), below " + minVolumeRatio + "x: source likely not fully published");
+        } else {
+            checks.put("volume_vs_trailing_median", Map.of("skipped", "only " + historyDays + " days of history"));
+        }
         for (String col : REQUIRED) {
             percentCheck(checks, failures, "missing_" + col + "_pct", num(p.get("missing_" + col)), total, maxMissingRequired);
         }

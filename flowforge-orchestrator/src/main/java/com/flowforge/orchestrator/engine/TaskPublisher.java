@@ -25,7 +25,11 @@ public class TaskPublisher {
     }
 
     public CompletableFuture<SendResult<String, String>> sendTask(TaskCommand command) {
-        return kafka.send(trace.record(Topics.TASKS, command.workflowId(), json.writeValueAsString(command), null));
+        // Keyed per TASK, not per workflow: workers need no ordering within a workflow, so one large DAG
+        // (e.g. a 30-day backfill) spreads across every partition and every worker instead of one.
+        // Orchestrator topics stay keyed by workflowId, which is what gives each workflow a single owner.
+        return kafka.send(trace.record(Topics.TASKS, command.workflowId() + ":" + command.taskId(),
+                json.writeValueAsString(command), null));
     }
 
     public CompletableFuture<SendResult<String, String>> sendDeadLetter(DeadLetter deadLetter) {

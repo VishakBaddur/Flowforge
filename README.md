@@ -7,6 +7,9 @@ of workers with dependencies, retries, exponential backoff, timeouts, worker lea
 dead-letter handling. Workflow state is event-sourced in PostgreSQL, so if an orchestrator crashes, another instance
 rebuilds its workflows from the log and continues.
 
+It also runs a production-style ETL workload over NYC 311 data (about 324,000 rows a month) with data-quality
+gates, idempotent loads, a watermark and parallel backfills. See [ETL workload](#etl-workload-nyc-311-service-requests).
+
 Built with Java 21, Spring Boot 4, Kafka, PostgreSQL, Redis, Docker, Kubernetes, Prometheus, Grafana, OpenTelemetry
 and GitHub Actions.
 
@@ -62,8 +65,9 @@ flowchart LR
     API -->|status cache| R
 ```
 
-- Every topic is keyed by workflow id. With the RangeAssignor, partition N of `workflow-commands` and `task-results`
+- `workflow-commands` and `task-results` are keyed by workflow id. With the RangeAssignor, partition N of both topics
   goes to the same orchestrator instance, so each workflow has exactly one owner and its messages are processed in order.
+  The `tasks` topic is keyed by workflow and task id, so a single large workflow spreads across every worker.
 - PostgreSQL is the source of truth and Kafka is the transport. Events are committed before anything is published, so
   a crash between the two leads to a re-publish during recovery. Duplicates are harmless because of attempt numbers
   and idempotency checks.
@@ -97,6 +101,63 @@ flowchart LR
 | Kubernetes rollout | `too many clients`: (replicas + surge) x pool size exceeded PostgreSQL `max_connections` | Connection budget per Deployment |
 | Kubernetes demo | Resource starvation crashed CoreDNS, causing DNS failures, and 1 s liveness probes then killed slow pods | `hostAliases`, longer probe timeouts, memory sizing |
 | CI image scan | 7 critical CVEs in Netty and Tomcat | Spring Boot 4.0.6 to 4.0.8, Tomcat 11.0.25 override |
+| ETL incremental run | The watermark advanced past a day the source had only partly published (1,114 of about 11,000 rows) | Volume check against the trailing 14-day median, plus a 2-day publication lag for incremental runs |
+| ETL worker kill test | All tasks of one workflow shared a Kafka key, so a 122-task backfill ran on a single worker | Tasks keyed by workflow and task id; orchestrator topics stay keyed by workflow id |
+
+## ETL workload: NYC 311 service requests
+
+Flowforge also runs an ETL pipeline over NYC's public 311 service request data (about 10,000 records a day). Each run
+is one Flowforge workflow: one chain per day, all days in parallel, and a final step that only runs after every day
+has loaded.
+
+```mermaid
+flowchart LR
+    P[plan] --> E1[extract day 1] --> V1[validate] --> T1[transform] --> L1[load] --> F[finalize]
+    P --> E2[extract day 2] --> V2[validate] --> T2[transform] --> L2[load] --> F
+    P --> E3[extract day N] --> V3[validate] --> T3[transform] --> L3[load] --> F
+```
+
+- Extract pages one day from the NYC Open Data API and stores the raw JSON in `raw.service_requests`. It is retried
+  up to 5 times.
+- Validate checks row counts, required columns, null thresholds, duplicates, and the day's volume against the trailing
+  14-day median, in one SQL pass. A failed check fails the task with no retries, sends it to the dead-letter topic,
+  and skips that day's downstream tasks.
+- Transform converts NYC local time to UTC timestamps, normalizes text, borough, zip code and coordinates, nulls
+  impossible close dates, keeps the latest version of each request, and records rejected rows with a reason.
+- Load upserts the date, agency, complaint type and location dimensions in sorted key order, then upserts the fact
+  table by natural key, where the newer source version wins.
+- Finalize confirms every day loaded, rebuilds the daily aggregate, computes a checksum of the loaded facts, writes a
+  run report, and advances the watermark.
+
+Every stage deletes and rewrites only its own (run, day) partition in one transaction, so a retried task never
+duplicates data. Data moves between stages through PostgreSQL tables (`raw`, `staging`, `analytics`) in a separate
+`analytics` database; Flowforge passes only small task outputs between tasks.
+
+The watermark ("data complete through") is advanced only by finalize, only forward, and only when the run is
+contiguous with what is already complete. If any day fails, finalize does not run and the watermark stays where it was.
+
+### ETL results
+
+| Measurement | Result |
+|---|---|
+| September 2026 backfill | 323,614 rows, 30 partitions, 122 tasks in 28.6 s (about 11,300 rows/s); the stages' combined busy time was about 490 s |
+| Accuracy | rows in the warehouse = rows reported by the API = distinct keys = 323,614 |
+| Re-running the same backfill | 0 inserted, 0 updated, 323,614 unchanged, identical fact checksum |
+| Worker killed mid-backfill | 16 tasks retried after lease expiry; 0 inserted, identical checksum |
+| Simulated source update (100 records) | exactly 100 rows updated; the checksum returned to its original value |
+| Upstream schema change (injected on one day) | caught by the required-column check and dead-lettered; the other days loaded; watermark held |
+| Partially published day (1,114 rows against a median of 11,070) | caught by the volume check; watermark held |
+| Cleaning (September and early October) | 211 impossible close dates nulled, 432 unknown boroughs, 3,270 missing or invalid zip codes, 6,306 missing or out-of-range coordinates |
+
+Extraction dominates run time (about 12.8 s per day waiting on the NYC API, against 0.2 s to validate, 0.7 s to
+transform and 2.7 s to load), so a 2-day incremental run takes about as long as a 30-day backfill. Incremental runs
+save work and load on the source, not wall-clock time.
+
+```bash
+python3 etl/pipeline.py backfill --start 2026-09-01 --end 2026-09-30
+python3 etl/pipeline.py incremental     # watermark minus a 2-day lookback, up to today minus a 2-day publication lag
+python3 etl/pipeline.py backfill --start 2026-09-01 --end 2026-09-07 --inject-fault 2026-09-04
+```
 
 ## Observability
 
@@ -178,3 +239,5 @@ Errors are returned as RFC 9457 problem details.
 - Hard-crash failover is bounded by Kafka's session timeout (6 s minimum on the broker).
 - Development credentials (the token issuer and the Kubernetes Secret) are committed for local use. Production would
   use an external identity provider and a secret manager.
+- Flowforge DAGs are fixed when submitted, so the ETL runner generates the backfill partitions up front rather
+  than at run time.

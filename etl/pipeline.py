@@ -53,7 +53,7 @@ def build(run_id, mode, days, fault_day):
         p = {**common, "partition_date": d}
         extract_in = dict(p, inject_fault="drop_created_date") if d == fault_day else p
         tasks += [
-            task(f"extract-{d}", "etl.extract", extract_in, ["plan"], 5, "PT3M"),        # network: retry
+            task(f"extract-{d}", "etl.extract", extract_in, ["plan"], 5, "PT90S"),        # network: retry
             task(f"validate-{d}", "etl.validate", p, [f"extract-{d}"], 0, "PT2M"),       # bad data won't fix itself
             task(f"transform-{d}", "etl.transform", p, [f"validate-{d}"], 2, "PT2M"),
             task(f"load-{d}", "etl.load", p, [f"transform-{d}"], 3, "PT2M"),            # transient lock conflicts
@@ -72,6 +72,7 @@ def main():
     b.add_argument("--inject-fault", metavar="DATE", help="simulate an upstream schema change on this day")
     i = sub.add_parser("incremental")
     i.add_argument("--lookback", type=int, default=2, help="re-process this many complete days for late updates")
+    i.add_argument("--lag", type=int, default=2, help="source publishes with a delay: stop this many days before today")
     args = ap.parse_args()
 
     if args.mode == "backfill":
@@ -82,9 +83,12 @@ def main():
         if not wm:
             sys.exit("no watermark yet: run a backfill first")
         start = dt.date.fromisoformat(wm) - dt.timedelta(days=args.lookback - 1)
-        end = dt.date.today() - dt.timedelta(days=1)
+        end = dt.date.today() - dt.timedelta(days=args.lag)
         fault = None
-        print(f"watermark is {wm}: re-processing {args.lookback} day(s) for late updates, new days up to {end}")
+        print(f"watermark is {wm}: re-processing {args.lookback} day(s) for late updates, "
+              f"new days up to {end} (publication lag {args.lag} days)")
+    if end < start:
+        sys.exit(f"nothing to do: {start} is after {end}")
     days = [(start + dt.timedelta(n)).isoformat() for n in range((end - start).days + 1)]
     run_id = f"{args.mode}-{days[0]}-{days[-1]}-{int(time.time())}"
     definition = build(run_id, args.mode, days, fault)
@@ -118,6 +122,7 @@ def main():
     if view["status"] == "COMPLETED":
         print(psql(f"SELECT jsonb_pretty(report) FROM etl.run WHERE run_id = '{run_id}'"))
     else:
+        psql(f"UPDATE etl.run SET status = 'FAILED', finished_at = now() WHERE run_id = '{run_id}' AND status = 'RUNNING'")
         for t in view["tasks"]:
             if t["status"] == "DEAD_LETTERED":
                 print(f"  {t['id']}: {t['lastError']}")
