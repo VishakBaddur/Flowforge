@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -56,7 +57,13 @@ public class WorkerListener {
                           IdempotencyStore idempotency, WorkerMetrics metrics,
                           KafkaTraceContext trace, Tracer tracer,
                           @Value("${HOSTNAME:local}") String host,
-                          @Value("${flowforge.worker.max-in-flight:1000}") int maxInFlight) {
+                          @Value("${flowforge.worker.max-in-flight:1000}") int maxInFlight,
+                          @Value("${spring.kafka.consumer.properties.session.timeout.ms:45000}") long sessionTimeoutMs) {
+        // A dead worker's phase-1 claim must expire before Kafka redelivers its records to another worker;
+        // otherwise the next worker sees the stale claim, skips the task, and it stays QUEUED forever.
+        if (PENDING_CLAIM_TTL.toMillis() >= sessionTimeoutMs)
+            throw new IllegalStateException("Phase-1 claim TTL (" + PENDING_CLAIM_TTL.toMillis()
+                    + " ms) must be shorter than the Kafka consumer session timeout (" + sessionTimeoutMs + " ms)");
         this.kafka = kafka;
         this.json = json;
         this.runner = runner;
@@ -67,7 +74,8 @@ public class WorkerListener {
         this.workerId = host + "-" + UUID.randomUUID().toString().substring(0, 8);
         this.inFlight = new Semaphore(maxInFlight);
         metrics.bindInFlight(inFlight, maxInFlight);
-        log.info("Worker {} ready; task types {}", workerId, runner.supportedTypes());
+        log.info("Worker {} ready; task types {}; phase-1 claim TTL {} ms < session timeout {} ms",
+                workerId, runner.supportedTypes(), PENDING_CLAIM_TTL.toMillis(), sessionTimeoutMs);
     }
 
     @KafkaListener(topics = Topics.TASKS, batch = "true")
@@ -124,10 +132,20 @@ public class WorkerListener {
         CompletableFuture.allOf(acks.toArray(CompletableFuture[]::new)).join();
 
         // Phase 2 for the whole batch in ONE round trip: the orchestrator's lease now covers these attempts.
-        idempotency.extendClaims(toRun, workerId, WorkerListener::lease);
+        // If another worker now holds a claim, that worker runs this attempt; running it here as well would
+        // duplicate its side effects. Our STARTED is harmless: the attempt is settled by its single result.
+        Set<TaskCommand> lost = idempotency.extendClaims(toRun, workerId, WorkerListener::lease);
 
         for (TaskCommand command : toRun) {
             Span span = spans.get(command);
+            if (lost.contains(command)) {
+                log.warn("{} attempt {}: claim taken by another worker before phase 2; not running it here",
+                        command.idempotencyKey(), command.attempt());
+                metrics.claimSkipped();
+                span.tag("outcome", "claim-lost-before-run");
+                span.end();
+                continue;
+            }
             inFlight.acquireUninterruptibly();   // backpressure: blocks the consumer when saturated
             executor.execute(() -> {
                 try (Tracer.SpanInScope ws = tracer.withSpan(span)) {

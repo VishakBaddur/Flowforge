@@ -17,10 +17,13 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.function.Function;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Supplier;
 
 /**
@@ -41,9 +44,15 @@ public class IdempotencyStore {
     /** After a failure, skip Redis for this long instead of paying a timeout on every call. */
     private static final long OPEN_CIRCUIT_MS = 5_000;
 
-    /** Extend the claim only if this worker still owns it (atomic check-and-set). */
+    /**
+     * Atomically: extend the claim if this worker still owns it; re-take it if it expired and nobody else took it.
+     * Returns 0 ONLY when another worker holds the claim.
+     */
     private static final String EXTEND_LUA =
-            "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end";
+            "local owner = redis.call('get', KEYS[1]) " +
+            "if owner == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) end " +
+            "if not owner then redis.call('set', KEYS[1], ARGV[1], 'PX', ARGV[2]) return 1 end " +
+            "return 0";
     private static final RedisScript<Long> EXTEND_IF_OWNER = new DefaultRedisScript<>(EXTEND_LUA, Long.class);
 
     public enum Prep { CACHED, CLAIMED, TAKEN }
@@ -120,11 +129,15 @@ public class IdempotencyStore {
         }, degraded);
     }
 
-    /** Phase 2 for a whole batch in ONE round trip: extend each claim to the full lease if still ours. */
-    public void extendClaims(List<TaskCommand> commands, String workerId, Function<TaskCommand, Duration> lease) {
-        if (commands.isEmpty()) return;
-        guarded("extend claims", () -> {
-            redis.executePipelined((RedisCallback<Object>) conn -> {
+    /**
+     * Phase 2 for a whole batch in ONE round trip: extend each claim to the full lease (or re-take it if it
+     * expired unclaimed). Returns the commands whose claim now belongs to ANOTHER worker; the caller must not
+     * run those. Redis down => empty set (attempt numbers still guarantee outcomes, as in phase 1).
+     */
+    public Set<TaskCommand> extendClaims(List<TaskCommand> commands, String workerId, Function<TaskCommand, Duration> lease) {
+        if (commands.isEmpty()) return Set.of();
+        return guarded("extend claims", () -> {
+            List<Object> results = redis.executePipelined((RedisCallback<Object>) conn -> {
                 for (TaskCommand c : commands) {
                     conn.scriptingCommands().eval(bytes(EXTEND_LUA), ReturnType.INTEGER, 1,
                             bytes(claimKey(c.idempotencyKey(), c.attempt())), bytes(workerId),
@@ -132,8 +145,12 @@ public class IdempotencyStore {
                 }
                 return null;
             });
-            return null;
-        }, null);
+            Set<TaskCommand> lost = Collections.newSetFromMap(new IdentityHashMap<>());
+            for (int i = 0; i < commands.size(); i++) {
+                if (Long.valueOf(0L).equals(results.get(i))) lost.add(commands.get(i));   // only a definite "taken"
+            }
+            return lost;
+        }, Set.<TaskCommand>of());
     }
 
     private static byte[] bytes(String s) {

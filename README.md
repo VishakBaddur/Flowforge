@@ -20,7 +20,7 @@ All numbers below come from scripts in `loadtest/` and `scripts/` and can be rep
 | Measurement | Result |
 |---|---|
 | Sustained throughput | 10,066 tasks/s over 50.7 s (510,000 tasks, about 4,400 concurrent workflows, tracing on), 0 lost, 0 duplicated |
-| Optimization | 11x over the first measurement (889 to 10,066 tasks/s); 14x (to 12,456) before tracing was added |
+| Optimization | 6.3x from code changes on the same 22-task workload (889 to 5,615 tasks/s); 100-wide DAGs then reached 12,456 tasks/s before tracing and 10,066 after |
 | Orchestrator stopped with SIGTERM | 555 ms failover, in-flight state rebuilt in 63 ms, 0 lost or duplicated |
 | Orchestrator killed with kill -9 | 6.3 s failover (Kafka's 6 s session timeout), state rebuilt in 10 ms |
 | Worker killed with kill -9 | interrupted tasks retried on another worker within about 10.6 s, 0 stuck |
@@ -98,9 +98,10 @@ flowchart LR
 | Found by | Problem | Fix |
 |---|---|---|
 | Worker kill test | A task could stay QUEUED forever because the dead worker's 7 s claim outlived Kafka's 6 s redelivery | Two-phase claim: 3 s pending TTL, then an atomic Lua extend once STARTED is durable |
+| Code review | The phase-2 claim extension's result was ignored, so a worker could run an attempt that another worker had claimed | The result is checked: an expired, unclaimed key is re-taken and a task claimed by another worker is skipped; the worker refuses to start unless the claim TTL is below Kafka's session timeout |
 | Redis outage test | An optional cache write blocked result reporting, causing 196 unnecessary retries | 500 ms timeouts and a circuit breaker; cache failures can no longer fail a task |
 | `timer_early` metric | Millisecond truncation made retry timers reschedule themselves in a 0 ms loop | Round delays up |
-| Failover timing | Graceful failover took 1.7 s because the surviving instance only learned of the rebalance on its next heartbeat | Heartbeat lowered from 2 s to 500 ms (262 ms failover) |
+| Failover timing | Graceful failover took 1.7 s because the surviving instance only learned of the rebalance on its next heartbeat | Heartbeat lowered from 2 s to 500 ms (262 ms failover in the run right after the fix; 555 ms in the later reliability-suite run) |
 | Kubernetes rollout | `too many clients`: (replicas + surge) x pool size exceeded PostgreSQL `max_connections` | Connection budget per Deployment |
 | Kubernetes demo | Resource starvation crashed CoreDNS, causing DNS failures, and 1 s liveness probes then killed slow pods | `hostAliases`, longer probe timeouts, memory sizing |
 | CI image scan | 7 critical CVEs in Netty and Tomcat | Spring Boot 4.0.6 to 4.0.8, Tomcat 11.0.25 override |
