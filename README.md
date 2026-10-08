@@ -25,7 +25,7 @@ All numbers below come from scripts in `loadtest/` and `scripts/` and can be rep
 | Orchestrator killed with kill -9 | 6.3 s failover (Kafka's 6 s session timeout), state rebuilt in 10 ms |
 | Worker killed with kill -9 | interrupted tasks retried on another worker within about 10.6 s, 0 stuck |
 | Redis frozen for 10 s | longest stall 1.6 s, 0 extra retries |
-| Kubernetes rolling restart and pod deletion under load | 300/300 workflows completed, 0 duplicated, 0 pod restarts |
+| Kubernetes rolling restart and pod deletion under load (single-node kind cluster, smoke-test scale) | 300/300 workflows completed, 0 duplicated, 0 pod restarts |
 | Tests | 39 automated tests (JUnit 5, AssertJ, Testcontainers with PostgreSQL), run in CI on every push |
 
 Across the reliability suite: 0 lost and 0 duplicated tasks.
@@ -158,7 +158,7 @@ contiguous with what is already complete. If any day fails, finalize does not ru
 | Partially published day (1,114 rows against a median of 11,070) | caught by the volume check; watermark held |
 | Cleaning (September and early October) | 211 impossible close dates nulled, 432 unknown boroughs, 3,270 missing or invalid zip codes, 6,306 missing or out-of-range coordinates |
 | Docker Compose (2 worker containers) | 30,892 rows over 3 days; tasks split 7 and 7 across the containers |
-| Kubernetes (kind) | 31,574 rows over 3 days in 15.8 s; 0 pod restarts |
+| Kubernetes (single-node kind cluster) | 31,574 rows over 3 days in 15.8 s; 0 pod restarts |
 
 Extraction dominates run time (about 12.8 s per day waiting on the NYC API, against 0.2 s to validate, 0.7 s to
 transform and 2.7 s to load), so a 2-day incremental run takes about as long as a 30-day backfill. Incremental runs
@@ -246,8 +246,10 @@ Errors are returned as RFC 9457 problem details.
   510K-task benchmark ran at 12,456 tasks/s before tracing and 10,066 tasks/s after (about 19% on a CPU-saturated laptop).
 - Workers interrupt in-flight tasks on SIGTERM. Those tasks are retried, not lost, but draining them during the
   shutdown grace period would avoid the retries.
-- CPU is the wrong autoscaling signal for I/O-bound workers (a worker kept up at 44% CPU). Scaling on Kafka consumer
-  lag, for example with KEDA, would fit better.
+- The worker HPA is configured but never scaled in testing: it targets 60% CPU, and workers are I/O-bound (a worker kept
+  up with full load at 44% CPU). Scaling on Kafka consumer lag, for example with KEDA, would fit better.
+- Kubernetes results come from a single-node kind cluster on a laptop: they validate the manifests, probes and rolling
+  updates, not multi-node or production-scale behavior.
 - Hard-crash failover is bounded by Kafka's session timeout (6 s minimum on the broker).
 - Development credentials (the token issuer and the Kubernetes Secret) are committed for local use. Production would
   use an external identity provider and a secret manager.
